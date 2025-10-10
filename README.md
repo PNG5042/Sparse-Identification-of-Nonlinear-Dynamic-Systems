@@ -5,7 +5,7 @@ Team Roster & Contacts
 
 Prathmesh Nitin Gite: gitep@oregonstate.edu
 Phuc Minh Chau: tranchau@oregonstate.edu
-Phiilip Nguyen: nguyphi4@oregonstate.edu
+Philip Nguyen: nguyphi4@oregonstate.edu
 
 Mentor: Ramon Ken Yoshiura (INL)
 ramon.yoshiura@inl.gov
