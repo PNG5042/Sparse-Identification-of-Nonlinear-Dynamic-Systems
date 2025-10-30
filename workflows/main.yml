@@ -17,23 +17,24 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: "3.10"
+        python-version: "3.13"
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install flake8
-        pip install black flake8 pytest
+        python -m pip install numpy matplotlib scipy
+        python -m pip install flake8 black pytest
+        python -m pip install -e ./pysindy
 
     - name: Lint with flake8
       run: |
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
+        python -m flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        python -m flake8 . --count --exit-zero --max-complexity=10 --max-line-length=500 --statistics
 
     - name: Format check with Black
       run: |
-        black --check .
+        python -m black --check . --exclude "pysindy"
 
     - name: Run tests
       run: |
-        pytest -v --maxfail=1 --disable-warnings
+        python -m pytest -v --maxfail=1 --disable-warnings
