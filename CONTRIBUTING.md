@@ -1,59 +1,99 @@
 # Contributing Guide
 
 How to set up, code, test, review, and release so contributions meet our Definition of Done.
+-py get-pip.py
+-Git clone https://github.com/dynamicslab/pysindy 
+-Then cd into pysindy and do pip install.
 
 ## Code of Conduct
 
-Don't be reckless when commiting code to the main branch.
+Don't be reckless when committing code to the main branch.
 Be respectful, communicate openly, and resolve conflicts constructively.  
 To report behavior concerns, contact the team lead via private Discord or email.
+
 ## Getting Started
 
-List prerequisites, setup steps, environment variables/secrets handling, and how to run the app locally.
 - Python 3.10+
-- pip
+- pip install
 - Git and GitHub account
+- Pysindy install
 
 ## Branching & Workflow
 
-Describe the workflow (e.g., trunk-based or GitFlow), default branch, branch naming, and when to rebase vs. merge.
+-We will be using the GitFlow method of branching, with each developer having their own branch. Then they will push their change onto the main branch once it has been checked and verified by themselves and one other teammate.
+-We will use a rebase system, where after we create a feature, we will update it to match the main branch.
 
 ## Issues & Planning
 
-Explain how to file issues, required templates/labels, estimation, and triage/assignment practices.
+-Each new bug, version, or document change will be posted on the GitHub project with a clear label and description
+-Labels could be: bugs, enhancement, documentation, high priority
 
 ## Commit Messages
 
-State the convention (e.g., Conventional Commits), include examples, and how to reference issues.
+We use the Conventional Commits convention for all commit messages to ensure clarity and consistency.
+Format: <type>(optional scope): short summary
+
+Examples:
+docs: update API usage section in README  
+fix(api): handle missing authentication token  
+feat: add processing data feature
+
+For each commit that fixes a specific issue should be label the issue’s number so we know which exact bug was fixed.
 
 ## Code Style, Linting & Formatting
 
 Name the formatter/linter, config file locations, and the exact commands to check/fix locally.
 
+-We use **Black** for formatting and **flake8** for linting.
+
+-Check style locally:
+"black . && flake8"
+
+
 ## Testing
 
-Define required test types, how to run tests, expected coverage thresholds, and when new/updated tests are mandatory.
+-All code must include unit tests using pytest.
+-Run all tests locally:
+"Pytest"
 
 ## Pull Requests & Reviews
 
-Outline PR requirements (template, checklist, size limits), reviewer expectations, approval rules, and required status checks.
+- Each PR must:
+  - Pass all CI checks (lint, tests, build)
+  - Be reviewed and approved by at least one teammate
+  - Include a descriptive title and link to the related issue
 
 ## CI/CD
 
-Link to pipeline definitions, list mandatory jobs, how to view logs/re-run jobs, and what must pass before merge/release.
+CI pipeline defined in `.github/workflows/main.yml`
+Jobs:
+- `lint` (flake8)
+- `test` (pytest)
+- `build` (verify code runs)
+
+All jobs must pass before merging to `main`.
 
 ## Security & Secrets
 
-State how to report vulnerabilities, prohibited patterns (hard-coded secrets), dependency update policy, and scanning tools.
+- Do not commit secrets or credentials.
+- Use environment variables or `.env` (excluded via .gitignore).
+- Report vulnerabilities privately to the team lead.
 
 ## Documentation Expectations
 
-Specify what must be updated (README, docs/, API refs, CHANGELOG) and docstring/comment standards.
+- Update README if setup or dependencies change.
+- Add/maintain docstrings for all functions/classes.
+- Use markdown in `/docs` for project-level documentation.
+
 
 ## Release Process
 
-Describe versioning scheme, tagging, changelog generation, packaging/publishing steps, and rollback process.
+- Semantic versioning (vMAJOR.MINOR.PATCH)
+- Tag releases on GitHub (e.g., `v1.0.0`)
+- Update CHANGELOG.md with summary of fixes/features.
 
 ## Support & Contact
 
-Provide maintainer contact channel, expected response windows, and where to ask questions.
+Questions or issues?  
+Open a GitHub issue with label `question` or message using Email
+Expected response: within 24 hours.
