@@ -1,10 +1,4 @@
 [tool.black]
 line-length = 88
-target-version = ['py311']
+target-version = ['py310']
 skip-string-normalization = false
-
-[tool.isort]
-profile = "black"
-line_length = 88
-multi_line_output = 3
-include_trailing_comma = true
