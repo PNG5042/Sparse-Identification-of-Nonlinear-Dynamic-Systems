@@ -3,7 +3,6 @@ import pysindy as ps
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
-
 # Damped harmonic oscillator
 
 # State vector: z = [x, v] where v = ẋ
