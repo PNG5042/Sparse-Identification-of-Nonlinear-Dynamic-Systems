@@ -24,4 +24,4 @@ with open(csv_filename, 'w', newline='') as csvfile:
     for point in unique_points:
         csv_writer.writerow(list(point))
 
-print(f"Generated 100 unique X,Y points and saved to '{"/Project" + csv_filename}'")
+print(f"Generated 100 unique X,Y points and saved to '{csv_filename}'")
