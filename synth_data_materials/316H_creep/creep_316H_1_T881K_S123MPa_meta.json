@@ -1,0 +1,20 @@
+{
+  "material": "316H Stainless Steel",
+  "test_type": "Creep",
+  "model": "Norton-Bailey with primary and tertiary stages",
+  "equation": "d\u03b5/dt = A*\u03c3^n*exp(-Q/RT) + primary + tertiary",
+  "parameters": {
+    "A": 1.056357830376805e-15,
+    "n": 4.50428310023687,
+    "Q": 270899.00666379643,
+    "R": 8.314,
+    "stress_MPa": 123.02712039526375,
+    "temperature_K": 881.6866382062137
+  },
+  "data_quality": {
+    "noise_level": 0.02,
+    "missing_rate": 0.0,
+    "time_jitter": false,
+    "duration_hours": 1000
+  }
+}
