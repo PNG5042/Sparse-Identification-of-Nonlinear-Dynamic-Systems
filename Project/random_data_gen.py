@@ -7,7 +7,8 @@ Generates realistic material behavior datasets with:
 - Known governing equations (ground truth)
 - Manufacturing/test condition variability
 - Realistic noise and measurement artifacts
-- Multiple material systems (creep, tensile, oxidation)
+- Multiple material systems (creep, (WIP tensile | oxidation) )
+- 
 """
 
 import numpy as np
