@@ -7,7 +7,8 @@ Generates realistic material behavior datasets with:
 - Known governing equations (ground truth)
 - Manufacturing/test condition variability
 - Realistic noise and measurement artifacts
-- Multiple material systems (creep, tensile, oxidation)
+- Multiple material systems (creep, (WIP tensile | oxidation) )
+- 
 """
 
 import numpy as np
@@ -23,7 +24,7 @@ import json
 
 def norton_bailey_creep(t,x,params):
     """
-    Norton-bailey creep Law for 316H SS and Alloy 617
+    Norton-bailey creep Law for 316H SS
     
     Governing equations:
     dε/dt = A * σ^n * exp(-Q/RT) + primary_term + tertiary_term
