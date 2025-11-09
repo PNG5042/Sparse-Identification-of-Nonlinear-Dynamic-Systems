@@ -1,7 +1,0 @@
-pytest
-black
-flake8
-isort
-numpy
-pandas
-matplotlib

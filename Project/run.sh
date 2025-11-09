@@ -2,6 +2,7 @@
 
 # ============================================================================
 # Materials Analysis Environment Setup and Execution Script
+# Cross-Platform Compatible (Windows/Linux/macOS)
 # ============================================================================
 
 set -e  # Exit on error
@@ -14,43 +15,66 @@ echo ""
 # Define virtual environment name
 VENV_NAME="materials_env"
 
+# Detect Python command (python3 on Linux/Mac, python on Windows)
+if command -v python3 &> /dev/null; then
+    PYTHON_CMD="python3"
+else
+    PYTHON_CMD="python"
+fi
+
 # Check if virtual environment exists
 if [ ! -d "$VENV_NAME" ]; then
     echo "📦 Virtual environment not found. Creating new environment..."
-    python3 -m venv $VENV_NAME
+    $PYTHON_CMD -m venv $VENV_NAME
     echo "✅ Virtual environment created: $VENV_NAME"
     echo ""
+    PACKAGES_NEEDED=true
 else
     echo "✅ Virtual environment found: $VENV_NAME"
     echo ""
+    PACKAGES_NEEDED=false
 fi
 
-# Activate virtual environment
+# Activate virtual environment (cross-platform)
 echo "🔧 Activating virtual environment..."
-source $VENV_NAME/bin/activate
+if [ -f "$VENV_NAME/Scripts/activate" ]; then
+    # Windows (Git Bash)
+    source $VENV_NAME/Scripts/activate
+elif [ -f "$VENV_NAME/bin/activate" ]; then
+    # Linux / macOS
+    source $VENV_NAME/bin/activate
+else
+    echo "❌ Could not find activation script in $VENV_NAME."
+    echo "Checking directory structure..."
+    ls -la $VENV_NAME/ 2>/dev/null || echo "Directory not accessible"
+    exit 1
+fi
 echo "✅ Environment activated"
 echo ""
 
 # Check if packages are installed
-echo "📋 Checking required packages..."
-PACKAGES_NEEDED=false
-
-for package in numpy pandas scipy matplotlib pysindy scikit-learn; do
-    if ! python -c "import ${package//-/_}" 2>/dev/null; then
-        PACKAGES_NEEDED=true
-        echo "   ❌ $package not found"
-    else
-        echo "   ✅ $package installed"
-    fi
-done
-
-echo ""
+if [ "$PACKAGES_NEEDED" = false ]; then
+    echo "📋 Checking required packages..."
+    for package in numpy pandas scipy matplotlib pysindy scikit-learn; do
+        if ! python -c "import ${package//-/_}" 2>/dev/null; then
+            PACKAGES_NEEDED=true
+            echo "   ❌ $package not found"
+        else
+            echo "   ✅ $package installed"
+        fi
+    done
+    echo ""
+fi
 
 # Install packages if needed
 if [ "$PACKAGES_NEEDED" = true ]; then
     echo "📥 Installing required packages..."
-    pip install --upgrade pip
-    pip install numpy pandas scipy matplotlib pysindy scikit-learn
+    python -m pip install --upgrade pip 2>/dev/null || echo "⚠️  Pip upgrade skipped"
+    if [ -f "requirements.txt" ]; then
+        pip install -r requirements.txt
+    else
+        pip install numpy pandas scipy matplotlib pysindy scikit-learn
+    fi
     echo "✅ All packages installed"
     echo ""
 else
@@ -124,13 +148,13 @@ case $choice in
     4)
         echo ""
         echo "👋 Exiting..."
-        deactivate
+        deactivate 2>/dev/null || true
         exit 0
         ;;
     *)
         echo ""
         echo "❌ Invalid choice. Exiting..."
-        deactivate
+        deactivate 2>/dev/null || true
         exit 1
         ;;
 esac
