@@ -82,7 +82,9 @@ class TensileTestModel:
             elif eps <= self.fracture_strain:
                 # Necking region (stress decreases)
                 # Linear decrease from UTS to failure stress
-                progress = (eps - self.necking_strain) / (self.fracture_strain - self.necking_strain)
+                progress = (eps - self.necking_strain) / (
+                    self.fracture_strain - self.necking_strain
+                )
                 failure_stress = 0.7 * self.UTS  # Stress at fracture
                 stress[i] = self.UTS - (self.UTS - failure_stress) * progress
 
@@ -122,7 +124,15 @@ def generate_tensile_dataset(temperatures, strain_rate=1e-3, n_points=1000):
         stress_noisy = model.add_noise(stress, noise_level=0.01)
 
         # Create dataframe
-        df = pd.DataFrame({"strain": strain, "stress": stress_noisy, "true_stress": stress, "temperature": temp, "strain_rate": strain_rate})
+        df = pd.DataFrame(
+            {
+                "strain": strain,
+                "stress": stress_noisy,
+                "true_stress": stress,
+                "temperature": temp,
+                "strain_rate": strain_rate,
+            }
+        )
 
         # Calculate engineering properties
         df["elastic_modulus"] = np.gradient(df["stress"], df["strain"])
@@ -185,7 +195,17 @@ for temp in temperatures:
     # Toughness (area under stress-strain curve)
     toughness = np.trapz(data_subset["stress"], data_subset["strain"])
 
-    properties_summary.append({"Temperature (°C)": temp, "Young's Modulus (GPa)": E_measured / 1000, "Yield Strength (MPa)": yield_stress, "UTS (MPa)": UTS, "Fracture Strain": fracture_strain, "Elongation (%)": elongation, "Toughness (MJ/m³)": toughness})
+    properties_summary.append(
+        {
+            "Temperature (°C)": temp,
+            "Young's Modulus (GPa)": E_measured / 1000,
+            "Yield Strength (MPa)": yield_stress,
+            "UTS (MPa)": UTS,
+            "Fracture Strain": fracture_strain,
+            "Elongation (%)": elongation,
+            "Toughness (MJ/m³)": toughness,
+        }
+    )
 
     print(f"\nTemperature: {temp}°C")
     print(f"  Young's Modulus:    {E_measured/1000:.1f} GPa")
@@ -215,11 +235,20 @@ for temp in temperatures:
     data_subset = tensile_data[tensile_data["temperature"] == temp].copy()
 
     # Fit only plastic region (after yield, before necking)
-    plastic_region = data_subset[(data_subset["strain"] > 0.005) & (data_subset["strain"] < data_subset["stress"].idxmax() / len(data_subset))]
+    plastic_region = data_subset[
+        (data_subset["strain"] > 0.005)
+        & (data_subset["strain"] < data_subset["stress"].idxmax() / len(data_subset))
+    ]
 
     if len(plastic_region) > 10:
         try:
-            popt, _ = curve_fit(power_law_hardening, plastic_region["strain"], plastic_region["stress"], p0=[1000, 0.3], maxfev=5000)
+            popt, _ = curve_fit(
+                power_law_hardening,
+                plastic_region["strain"],
+                plastic_region["stress"],
+                p0=[1000, 0.3],
+                maxfev=5000,
+            )
             K_fit, n_fit = popt
 
             # Calculate R² for fit quality
@@ -299,7 +328,14 @@ print("ALTERNATIVE: PYSINDY ON PLASTIC REGION ONLY")
 print("=" * 70)
 
 # Focus on plastic region where behavior is more regular
-plastic_data = sample_data[(sample_data["strain"] > 0.01) & (sample_data["strain"] < sample_data["strain"].quantile(0.8))].copy().reset_index(drop=True)
+plastic_data = (
+    sample_data[
+        (sample_data["strain"] > 0.01)
+        & (sample_data["strain"] < sample_data["strain"].quantile(0.8))
+    ]
+    .copy()
+    .reset_index(drop=True)
+)
 
 if len(plastic_data) > 50:
     X_plastic = plastic_data["stress"].values.reshape(-1, 1)

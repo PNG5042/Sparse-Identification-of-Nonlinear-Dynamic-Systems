@@ -12,6 +12,7 @@ exclude =
     *.egg-info
     tests/*.py: F401,W293
     *.py: E722
+per-file-ignores =
     tests/*.py: F401,W293
     creep_test.py: F401
     tensile_test.py: F401,E722

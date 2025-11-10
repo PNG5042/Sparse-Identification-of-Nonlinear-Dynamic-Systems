@@ -54,6 +54,10 @@ exclude =
     .pytest_cache,
     htmlcov,
     *.egg-info
+per-file-ignores =
+    tests/*.py: F401,W293
+    creep_test.py: F401
+    tensile_test.py: F401,E722
 show-source = True
 statistics = True
 count = True

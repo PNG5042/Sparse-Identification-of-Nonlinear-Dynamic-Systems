@@ -9,7 +9,9 @@ def print_csv_data():
         with open(filename, "r", newline="") as csvfile:
             reader = csv.reader(csvfile)
             for row in reader:
-                print(", ".join(row))  # Prints each row with elements separated by a comma and space
+                print(
+                    ", ".join(row)
+                )  # Prints each row with elements separated by a comma and space
     except FileNotFoundError:
         print(f"Error: The file '{filename}' was not found.")
     except Exception as e:

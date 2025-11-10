@@ -59,7 +59,17 @@ def norton_bailey_creep(t, x, params):
 # ============================================================================
 
 
-def simulate_system(rhs, x0, params, t_span=(0, 10), dt=0.01, noise_std=0.0, jitter_timestamps=False, missing_rate=0.0, relative_noise=True):
+def simulate_system(
+    rhs,
+    x0,
+    params,
+    t_span=(0, 10),
+    dt=0.01,
+    noise_std=0.0,
+    jitter_timestamps=False,
+    missing_rate=0.0,
+    relative_noise=True,
+):
     """
     Simulate material system with realistic measurement artifacts.
 
@@ -77,7 +87,15 @@ def simulate_system(rhs, x0, params, t_span=(0, 10), dt=0.01, noise_std=0.0, jit
     t_eval = np.arange(t_span[0], t_span[1] + dt / 2, dt)
 
     # Solve ODE
-    sol = solve_ivp(lambda tt, xx: rhs(tt, xx, params), t_span, x0, t_eval=t_eval, rtol=1e-8, atol=1e-10, method="RK45")
+    sol = solve_ivp(
+        lambda tt, xx: rhs(tt, xx, params),
+        t_span,
+        x0,
+        t_eval=t_eval,
+        rtol=1e-8,
+        atol=1e-10,
+        method="RK45",
+    )
 
     X = sol.y.T  # shape (N, n_states)
 
@@ -124,7 +142,14 @@ def generate_creep_tests_316H(out_dir="synth_data/316H_creep", n_tests=10):
     os.makedirs(out_dir, exist_ok=True)
 
     # 316H SS creep parameters (literature-based ranges)
-    base_params = {"A": 1e-15, "n": 5.0, "Q": 300000.0, "R": 8.314, "k_primary": 0.5, "k_tertiary": 0.3}  # Material constant (1/MPa^n/hr)  # Stress exponent (typically 4-7 for 316H)  # Activation energy (J/mol)  # Gas constant
+    base_params = {
+        "A": 1e-15,
+        "n": 5.0,
+        "Q": 300000.0,
+        "R": 8.314,
+        "k_primary": 0.5,
+        "k_tertiary": 0.3,
+    }  # Material constant (1/MPa^n/hr)  # Stress exponent (typically 4-7 for 316H)  # Activation energy (J/mol)  # Gas constant
 
     datasets_info = []
 
@@ -138,7 +163,16 @@ def generate_creep_tests_316H(out_dir="synth_data/316H_creep", n_tests=10):
         n = base_params["n"] + np.random.uniform(-0.5, 0.5)
         Q = base_params["Q"] * (1 + np.random.uniform(-0.1, 0.1))
 
-        params = [A, n, Q, base_params["R"], T, sigma, base_params["k_primary"], base_params["k_tertiary"]]
+        params = [
+            A,
+            n,
+            Q,
+            base_params["R"],
+            T,
+            sigma,
+            base_params["k_primary"],
+            base_params["k_tertiary"],
+        ]
 
         x0 = [0.0, 0.0]  # [initial_strain, initial_damage]
 
@@ -148,7 +182,16 @@ def generate_creep_tests_316H(out_dir="synth_data/316H_creep", n_tests=10):
         missing_rate = np.random.choice([0.0, 0.01, 0.02])
         jitter = np.random.choice([False, True], p=[0.6, 0.4])
 
-        df = simulate_system(norton_bailey_creep, x0, params, t_span=(0, t_max), dt=1.0, noise_std=noise_std, jitter_timestamps=jitter, missing_rate=missing_rate)
+        df = simulate_system(
+            norton_bailey_creep,
+            x0,
+            params,
+            t_span=(0, t_max),
+            dt=1.0,
+            noise_std=noise_std,
+            jitter_timestamps=jitter,
+            missing_rate=missing_rate,
+        )
 
         # Rename columns to physical quantities
         df.rename(columns={"x0": "strain", "x1": "damage"}, inplace=True)
@@ -160,7 +203,26 @@ def generate_creep_tests_316H(out_dir="synth_data/316H_creep", n_tests=10):
         df.to_csv(os.path.join(out_dir, name + ".csv"), index=False)
 
         # Save metadata
-        meta = {"material": "316H Stainless Steel", "test_type": "Creep", "model": "Norton-Bailey with primary and tertiary stages", "equation": "dε/dt = A*σ^n*exp(-Q/RT) + primary + tertiary", "parameters": {"A": float(A), "n": float(n), "Q": float(Q), "R": float(base_params["R"]), "stress_MPa": float(sigma), "temperature_K": float(T)}, "data_quality": {"noise_level": float(noise_std), "missing_rate": float(missing_rate), "time_jitter": bool(jitter), "duration_hours": int(t_max)}}
+        meta = {
+            "material": "316H Stainless Steel",
+            "test_type": "Creep",
+            "model": "Norton-Bailey with primary and tertiary stages",
+            "equation": "dε/dt = A*σ^n*exp(-Q/RT) + primary + tertiary",
+            "parameters": {
+                "A": float(A),
+                "n": float(n),
+                "Q": float(Q),
+                "R": float(base_params["R"]),
+                "stress_MPa": float(sigma),
+                "temperature_K": float(T),
+            },
+            "data_quality": {
+                "noise_level": float(noise_std),
+                "missing_rate": float(missing_rate),
+                "time_jitter": bool(jitter),
+                "duration_hours": int(t_max),
+            },
+        }
 
         with open(os.path.join(out_dir, name + "_meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
@@ -189,7 +251,9 @@ def generate_all_material_datasets(base_dir="synth_data_materials", n_per_type=1
 
     # 316H Creep tests
     print("\n[1/1] Generating 316H Stainless Steel Creep Tests...")
-    all_info["316H_creep"] = generate_creep_tests_316H(os.path.join(base_dir, "316H_creep"), n_per_type)
+    all_info["316H_creep"] = generate_creep_tests_316H(
+        os.path.join(base_dir, "316H_creep"), n_per_type
+    )
 
     print("\n" + "=" * 70)
     print(f"✓ Complete! Generated {sum(len(v) for v in all_info.values())} datasets")

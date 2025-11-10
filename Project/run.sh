@@ -284,7 +284,7 @@ EOF
         # Step 2: Black
         echo "STEP 2/3: Code Formatting"
         echo "-------------------------"
-        black . --line-length=500 2>/dev/null && \
+        black . --line-length=100 2>/dev/null && \
             echo "⚠️  Formatting issues detected"
         echo ""
         

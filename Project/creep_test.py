@@ -94,9 +94,25 @@ def generate_creep_dataset(stress_levels, temp=950, time_max=1000, n_points=500)
         y0 = [0.0, stress, 0.0]
 
         # Solve ODE system
-        sol = solve_ivp(lambda t, y: model.creep_damage_ode(t, y, stress), t_span, y0, t_eval=t_eval, method="RK45", rtol=1e-6)
+        sol = solve_ivp(
+            lambda t, y: model.creep_damage_ode(t, y, stress),
+            t_span,
+            y0,
+            t_eval=t_eval,
+            method="RK45",
+            rtol=1e-6,
+        )
 
-        df = pd.DataFrame({"time": sol.t, "strain": sol.y[0], "stress": sol.y[1], "damage": sol.y[2], "applied_stress": stress, "temperature": temp})
+        df = pd.DataFrame(
+            {
+                "time": sol.t,
+                "strain": sol.y[0],
+                "stress": sol.y[1],
+                "damage": sol.y[2],
+                "applied_stress": stress,
+                "temperature": temp,
+            }
+        )
 
         # Calculate strain rate
         df["strain_rate"] = np.gradient(df["strain"], df["time"])
