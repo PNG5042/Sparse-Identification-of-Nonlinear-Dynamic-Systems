@@ -1,5 +1,5 @@
 [tool.black]
-line-length = 500
+line-length = 100
 target-version = ['py39', 'py310', 'py311']
 extend-exclude = '''
 /(
@@ -8,12 +8,10 @@ extend-exclude = '''
   | materials_env
   | \.pytest_cache
   | htmlcov
-  | tests       
 )/
 '''
 
-
 [tool.isort]
 profile = "black"
-line_length = 500
+line_length = 100
 skip = [".venv", "venv", "materials_env", ".pytest_cache"]
