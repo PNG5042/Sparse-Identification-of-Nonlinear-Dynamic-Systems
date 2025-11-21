@@ -356,3 +356,4 @@ if results:
     best = max(results, key=lambda x: x['score'])
     print(f"  - Best optimizer: {best['name']} (Score: {best['score']:.4f})")
 print(f"\nFigure saved to: creep_sindy_analysis.png")
+
