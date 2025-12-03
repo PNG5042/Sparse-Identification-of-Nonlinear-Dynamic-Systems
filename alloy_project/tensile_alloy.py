@@ -83,6 +83,18 @@ class TensileTestModel:
 
 # -------------------------
 # Data generation
+# Creates tensile-test datasets for multiple temperatures
+# Create an empty list to store each temperature’s DataFrame.
+# Loop through each temperature.
+# Create a tensile-test model instance for the current temperature.
+# Generate a strain array from 0 → fracture strain using n_points samples.
+# Compute the theoretical stress values (no noise)
+# Add 1% noise to simulate experimental measurement errors.
+# Create a DataFrame
+# Compute true strain using:εtrue = ln(1+ε)
+# Compute approximate true stress 
+# Append the DataFrame for this temperature to the list
+# Concatenate all DataFrames into one and return it.
 # -------------------------
 def generate_tensile_dataset(temperatures_c, strain_rate=1e-3, n_points=1000):
     rows = []
@@ -109,13 +121,16 @@ def generate_tensile_dataset(temperatures_c, strain_rate=1e-3, n_points=1000):
 # -------------------------
 def extract_properties(df):
     out = {}
-    # choose small-strain window for slope estimate (robust to noise)
+    # Select a small-strain region (≤ 0.5%), which is approximately linear elastic and used to compute Young’s modulus.
     small_eps = df[df["strain"] <= 0.005]
+    # Fit a line (degree 1 polynomial) to small-strain stress–strain data.
     E_measured = np.polyfit(small_eps["strain"], small_eps["stress"], 1)[0]
-
+    # Compute the 0.2% offset line, used to find yield strength.
     offset = 0.002
     offset_line = E_measured * (df["strain"] - offset)
+    # Find the first index where stress exceeds the offset line → Yield point.
     idx = np.where(df["stress"].values > offset_line.values)[0]
+    # If a crossing point exists: get index, yield stress, yield strain
     if idx.size > 0:
         yield_idx = idx[0]
         yield_stress = float(df.iloc[yield_idx]["stress"])
