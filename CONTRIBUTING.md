@@ -14,9 +14,8 @@ To report behavior concerns, contact the team lead via private Discord or email.
 ## Getting Started
 
 - Python 3.10+
-- pip install
+- pip install -r requirements.txt
 - Git and GitHub account
-- Pysindy install
 
 ## Branching & Workflow
 

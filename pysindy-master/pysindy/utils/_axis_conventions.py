@@ -1,2 +1,0 @@
-AX_TIME = -2
-AX_COORD = -1
