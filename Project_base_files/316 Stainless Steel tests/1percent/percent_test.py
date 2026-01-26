@@ -13,10 +13,12 @@ from sklearn.metrics import r2_score
 from sklearn.feature_selection import SelectKBest, f_regression
 import matplotlib.pyplot as plt
 from scipy import stats
+from pathlib import Path
 
 # Load data
-df = pd.read_csv(r"C:\Users\phili\Documents\GitHub\Sparse-Identification-of-Nonlinear-Dynamic-Systems\Test_data\SS316H-1percent.csv")
-
+csv_path = Path(__file__).parent / "SS316H-1percent.csv"
+df = pd.read_csv(csv_path)
+A
 print("="*80)
 print("SS316H CREEP MODEL - FINAL OPTIMIZED VERSION")
 print("="*80)
