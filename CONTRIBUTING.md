@@ -1,9 +1,6 @@
 # Contributing Guide
 
 How to set up, code, test, review, and release so contributions meet our Definition of Done.
--py get-pip.py
--Git clone https://github.com/dynamicslab/pysindy 
--Then cd into pysindy and do pip install.
 
 ## Code of Conduct
 
@@ -19,8 +16,21 @@ To report behavior concerns, contact the team lead via private Discord or email.
 
 ## Branching & Workflow
 
--We will be using the GitFlow method of branching, with each developer having their own branch. Then they will push their change onto the main branch once it has been checked and verified by themselves and one other teammate.
--We will use a rebase system, where after we create a feature, we will update it to match the main branch.
+Enforce clean commits, consistent naming, and updated documentation
+
+- Clean Commits
+  - If adding brand new feature create new branch base one main
+  - If adding onto another branch base it one that branch instead
+  - When committing do -Updating / feat to make it clear if you’re adding a new feat or simplie updating something
+
+- Consistent naming
+  - As stated before, use the same words like 'updating' if you are simplifying or changing something to keep things clear. 
+  - For example, instead of everyone using -Adding, Feat, Function to show adding a new feature, just use -Feat. Simple and easy
+
+- Update Documentation
+  - As we continue to work on the program, make sure to update how to run your program as you go on another new branch to update the README, CONTRIB, etc. 
+  - Better to do little by little over time than all of it at once.
+
 
 ## Issues & Planning
 
@@ -30,30 +40,21 @@ To report behavior concerns, contact the team lead via private Discord or email.
 ## Commit Messages
 
 We use the Conventional Commits convention for all commit messages to ensure clarity and consistency.
-Format: <type>(optional scope): short summary
+- Use bullet points of what change/added/deleted, etc
 
 Examples:
-docs: update API usage section in README  
-fix(api): handle missing authentication token  
-feat: add processing data feature
+- updated 1% test
+  - divided data to short/long test
+  - use 5 different test methods
+  - pick best one
+  - Improve accuracy
 
 For each commit that fixes a specific issue should be label the issue’s number so we know which exact bug was fixed.
 
-## Code Style, Linting & Formatting
-
-Name the formatter/linter, config file locations, and the exact commands to check/fix locally.
-
--We use **Black** for formatting and **flake8** for linting.
-
--Check style locally:
-"black . && flake8"
-
-
 ## Testing
 
--All code must include unit tests using pytest.
--Run all tests locally:
-"Pytest"
+- Currently, you will have to run it manumal by running each python program in the ternimal
+(plan to change later in the future)
 
 ## Pull Requests & Reviews
 
@@ -61,16 +62,6 @@ Name the formatter/linter, config file locations, and the exact commands to chec
   - Pass all CI checks (lint, tests, build)
   - Be reviewed and approved by at least one teammate
   - Include a descriptive title and link to the related issue
-
-## CI/CD
-
-CI pipeline defined in `.github/workflows/main.yml`
-Jobs:
-- `lint` (flake8)
-- `test` (pytest)
-- `build` (verify code runs)
-
-All jobs must pass before merging to `main`.
 
 ## Security & Secrets
 
