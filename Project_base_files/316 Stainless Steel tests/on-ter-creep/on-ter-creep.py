@@ -69,17 +69,13 @@ y_pred_h = np.exp(y_pred)
 # ==============================
 # METRICS
 # ==============================
-mae = mean_absolute_error(y_test_h, y_pred_h)
-mape = mean_absolute_percentage_error(y_test_h, y_pred_h)
-r2_log = r2_score(y_test, y_pred)        # R^2 in log space (recommended)
-r2_hours = r2_score(y_test_h, y_pred_h)  # R^2 in hours (can look worse due to scale)
-
 print("===== Metrics (hours) =====")
-print(f"MAE  = {mae:.3f} h")
-print(f"MAPE = {mape*100:.2f} %")
+print(f"MAE  = {mean_absolute_error(y_test_h, y_pred_h):.3f} h")
+print(f"MAPE = {mean_absolute_percentage_error(y_test_h, y_pred_h)*100:.2f} %")
+
 print("===== R^2 =====")
-print(f"R^2 (log-hours space) = {r2_log:.4f}")
-print(f"R^2 (hours space)     = {r2_hours:.4f}")
+print(f"R^2 (log-hours space) = {r2_score(y_test, y_pred):.4f}")
+print(f"R^2 (hours space)     = {r2_score(y_test_h, y_pred_h):.4f}")
 
 print("\nModel coefficients (scaled inputs):", model.coef_)
 print("Intercept (log-hours):", model.intercept_)
@@ -179,15 +175,3 @@ plt.ylabel("Stress (MPa)")
 plt.title("Predicted Tertiary Creep Time Surface (Hours)")
 plt.tight_layout()
 plt.show()
-
-# 8) Show the top/bottom predicted hours on the test set (quick sanity check)
-test_results = pd.DataFrame({
-    "temp_k": X_test[:, 0],
-    "stress_mpa": X_test[:, 1],
-    "actual_h": y_test_h,
-    "pred_h": y_pred_h,
-    "abs_err_h": np.abs(residuals_h),
-})
-
-print("\nTop 10 worst absolute errors (test set):")
-print(test_results.sort_values("abs_err_h", ascending=False).head(10).to_string(index=False))
