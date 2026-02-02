@@ -1,9 +1,3 @@
-"""
-Example usage of the enhanced creep rupture prediction module.
-
-This script demonstrates various use cases and features.
-"""
-
 from creep_rupture_sindy import *
 import numpy as np
 
@@ -13,8 +7,7 @@ def example_basic_workflow():
     print("\n" + "="*70)
     print("EXAMPLE 1: Basic Workflow")
     print("="*70)
-    
-    # Load data
+
     df = pd.read_excel("SS316H-rupture.xlsx", sheet_name="Rupture")
     df = standardize_columns(df)
     
