@@ -1,223 +1,242 @@
+"""
+Example usage of the enhanced creep rupture prediction module.
+
+This script demonstrates various use cases and features.
+"""
+
+from creep_rupture_sindy import *
 import numpy as np
-import pandas as pd
-import pysindy as ps
-from sklearn.model_selection import train_test_split
-
-# ----------------------------
-# Utilities
-# ----------------------------
-def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Make column names easier to match across files.
-    """
-    rename = {}
-    for c in df.columns:
-        lc = c.strip().lower()
-        if "temp" in lc:
-            rename[c] = "T_K"
-        elif "stress" in lc:
-            rename[c] = "stress_MPa"
-        elif "rupture" in lc and ("time" in lc or "h" in lc):
-            rename[c] = "time_h"
-        elif "time" in lc and ("h" in lc or "hour" in lc):
-            rename[c] = "time_h"
-        elif lc == "heat":
-            rename[c] = "heat"
-    df = df.rename(columns=rename)
-
-    required = {"T_K", "stress_MPa", "time_h"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns {missing}. Found columns: {list(df.columns)}")
-
-    # Coerce numeric
-    df["T_K"] = pd.to_numeric(df["T_K"], errors="coerce")
-    df["stress_MPa"] = pd.to_numeric(df["stress_MPa"], errors="coerce")
-    df["time_h"] = pd.to_numeric(df["time_h"], errors="coerce")
-    df = df.dropna(subset=["T_K", "stress_MPa", "time_h"])
-
-    # Guard against non-physical values
-    df = df[(df["T_K"] > 0) & (df["stress_MPa"] > 0) & (df["time_h"] > 0)]
-    return df
 
 
-def lmp(T_K: np.ndarray, time_h: np.ndarray, C: float = 20.0) -> np.ndarray:
-    """
-    Larson–Miller Parameter (LMP).
-    LMP = T * (C + log10(t_r))
-    """
-    return T_K * (C + np.log10(time_h))
-
-
-def rmse(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.sqrt(np.mean((a - b) ** 2)))
-
-
-# ----------------------------
-# PySINDy Model fitting
-# ----------------------------
-def fit_sindy_lmp_model(df: pd.DataFrame, C: float = 20.0, 
-                        poly_degree: int = 3, threshold: float = 0.01):
-    """
-    Use PySINDy to discover the relationship between LMP and stress.
+def example_basic_workflow():
+    """Example 1: Basic model fitting and prediction."""
+    print("\n" + "="*70)
+    print("EXAMPLE 1: Basic Workflow")
+    print("="*70)
     
-    Parameters:
-    -----------
-    df : DataFrame with T_K, stress_MPa, time_h
-    C : LMP constant (can be optimized separately)
-    poly_degree : maximum polynomial degree for library
-    threshold : sparsity threshold for STLSQ
+    # Load data
+    df = pd.read_excel("SS316H-rupture.xlsx", sheet_name="Rupture")
+    df = standardize_columns(df)
     
-    Returns:
-    --------
-    dict with model, scaler info, and metadata
-    """
-    # Calculate LMP
-    T = df["T_K"].to_numpy()
-    t = df["time_h"].to_numpy()
-    stress = df["stress_MPa"].to_numpy()
+    # Fit model
+    model = fit_sindy_lmp_model(df, C=20.0, poly_degree=3)
+    print_model_summary(model)
     
-    LMP_vals = lmp(T, t, C=C)
+    # Single prediction
+    t_rupture = predict_rupture_time(873.0, 200.0, model)
+    print(f"\nPrediction for T=873K, σ=200MPa:")
+    print(f"  Rupture time: {t_rupture:.1f} hours ({t_rupture/8760:.2f} years)")
+
+
+def example_parameter_optimization():
+    """Example 2: Optimize C parameter."""
+    print("\n" + "="*70)
+    print("EXAMPLE 2: Parameter Optimization")
+    print("="*70)
     
-    # Transform stress to log scale (common in creep analysis)
-    log_stress = np.log10(stress).reshape(-1, 1)
-    LMP_vals = LMP_vals.reshape(-1, 1)
+    df = pd.read_excel("SS316H-rupture.xlsx", sheet_name="Rupture")
+    df = standardize_columns(df)
     
-    # Split data for validation
-    X_train, X_test, y_train, y_test = train_test_split(
-        log_stress, LMP_vals, test_size=0.2, random_state=42
+    # Fine grid around typical values
+    C_grid = np.linspace(18, 22, 21)
+    
+    best_model, results = optimize_C_parameter(
+        df, 
+        C_grid=C_grid,
+        poly_degree=3,
+        threshold=0.01
     )
     
-    # Create polynomial library
-    library = ps.PolynomialLibrary(degree=poly_degree, include_bias=True)
+    print(f"\nOptimal C: {best_model.C:.3f}")
+    print(f"Test R²: {best_model.test_r2:.4f}")
+    print(f"CV R²: {best_model.cv_mean:.4f} ± {best_model.cv_std:.4f}")
     
-    # Use STLSQ optimizer for sparsity
-    optimizer = ps.STLSQ(threshold=threshold, alpha=0.01)
-    
-    # Fit SINDy model
-    model = ps.SINDy(
-        feature_library=library,
-        optimizer=optimizer,
-        feature_names=["log10(stress)"]
-    )
-    
-    model.fit(X_train, y_train, quiet=True)
-    
-    # Evaluate
-    y_pred_train = model.predict(X_train)
-    y_pred_test = model.predict(X_test)
-    
-    train_rmse = rmse(y_train.flatten(), y_pred_train.flatten())
-    test_rmse = rmse(y_test.flatten(), y_pred_test.flatten())
-    
-    return {
-        "model": model,
-        "C": float(C),
-        "poly_degree": poly_degree,
-        "threshold": threshold,
-        "train_rmse": float(train_rmse),
-        "test_rmse": float(test_rmse),
-        "train_score": float(model.score(X_train, y_train)),
-        "test_score": float(model.score(X_test, y_test))
-    }
+    # Plot results
+    plot_c_optimization(results)
 
 
-def optimize_C_with_sindy(df: pd.DataFrame, C_grid=None, poly_degree: int = 3):
-    """
-    Find optimal C parameter by scanning and fitting SINDy models.
-    """
-    if C_grid is None:
-        C_grid = np.linspace(15.0, 25.0, 21)
+def example_batch_predictions():
+    """Example 3: Generate predictions for multiple conditions."""
+    print("\n" + "="*70)
+    print("EXAMPLE 3: Batch Predictions")
+    print("="*70)
     
-    best = None
-    results = []
+    df = pd.read_excel("SS316H-rupture.xlsx", sheet_name="Rupture")
+    df = standardize_columns(df)
     
-    for C in C_grid:
-        try:
-            result = fit_sindy_lmp_model(df, C=C, poly_degree=poly_degree)
-            results.append(result)
-            
-            # Use validation RMSE for selection
-            if (best is None) or (result["test_rmse"] < best["test_rmse"]):
-                best = result
-        except Exception as e:
-            print(f"Failed to fit with C={C:.2f}: {e}")
-            continue
+    # Fit model
+    model = fit_sindy_lmp_model(df, C=20.0)
     
-    return best, results
-
-
-def predict_rupture_time_hours(T_K: float, stress_MPa: float, model_dict: dict) -> float:
-    """
-    Predict rupture time using fitted SINDy model.
-    
-    Steps:
-      1) Predict LMP from log10(stress) using SINDy model
-      2) Invert LMP relation to solve for time
-    """
-    C = model_dict["C"]
-    model = model_dict["model"]
-    
-    log_stress = np.log10(stress_MPa).reshape(1, -1)
-    LMP_pred = float(model.predict(log_stress)[0, 0])
-    
-    # LMP = T*(C + log10(t))  => log10(t) = (LMP/T) - C
-    logt = (LMP_pred / T_K) - C
-    t_h = 10 ** logt
-    return float(t_h)
-
-
-# ----------------------------
-# Main
-# ----------------------------
-if __name__ == "__main__":
-    # Update path if needed
-    path = "SS316H-rupture.xlsx"
-    sheet = "Rupture"
-    
-    raw = pd.read_excel(path, sheet_name=sheet)
-    df = standardize_columns(raw)
-    
-    print(f"Loaded {len(df)} data points")
-    print(f"Temperature range: {df['T_K'].min():.1f} - {df['T_K'].max():.1f} K")
-    print(f"Stress range: {df['stress_MPa'].min():.1f} - {df['stress_MPa'].max():.1f} MPa")
-    print(f"Time range: {df['time_h'].min():.1f} - {df['time_h'].max():.1f} h\n")
-    
-    # Option 1: Fit with fixed C=20
-    print("=== Fitting SINDy model with C=20 ===")
-    model_fixed = fit_sindy_lmp_model(df, C=20.0, poly_degree=3, threshold=0.01)
-    
-    print(f"Train RMSE: {model_fixed['train_rmse']:.3f}")
-    print(f"Test RMSE: {model_fixed['test_rmse']:.3f}")
-    print(f"Train R²: {model_fixed['train_score']:.4f}")
-    print(f"Test R²: {model_fixed['test_score']:.4f}\n")
-    
-    print("Discovered equation (LMP as function of log10(stress)):")
-    model_fixed["model"].print()
-    print()
-    
-    # Option 2: Optimize C parameter
-    print("=== Optimizing C parameter ===")
-    best_model, all_results = optimize_C_with_sindy(df, poly_degree=3)
-    
-    print(f"Best C: {best_model['C']:.3f}")
-    print(f"Train RMSE: {best_model['train_rmse']:.3f}")
-    print(f"Test RMSE: {best_model['test_rmse']:.3f}")
-    print(f"Train R²: {best_model['train_score']:.4f}")
-    print(f"Test R²: {best_model['test_score']:.4f}\n")
-    
-    print("Discovered equation (LMP as function of log10(stress)):")
-    best_model["model"].print()
-    print()
-    
-    # Example predictions
-    print("=== Example Predictions ===")
-    test_conditions = [
+    # Define operating conditions
+    conditions = [
+        (773.0, 300.0),  # Low temp, high stress
+        (823.0, 250.0),
         (873.0, 200.0),
         (923.0, 150.0),
-        (823.0, 250.0)
+        (973.0, 100.0),  # High temp, low stress
     ]
     
-    for T_test, stress_test in test_conditions:
-        t_pred = predict_rupture_time_hours(T_test, stress_test, best_model)
-        print(f"T={T_test} K, σ={stress_test} MPa → t_rupture = {t_pred:.2f} h ({t_pred/8760:.2f} years)")
+    # Generate predictions
+    pred_table = create_prediction_table(conditions, model)
+    
+    print("\nPredictions:")
+    print(pred_table.to_string(index=False))
+    
+    # Save to file
+    pred_table.to_csv("example_predictions.csv", index=False)
+    print("\nSaved to: example_predictions.csv")
+
+
+def example_custom_analysis():
+    """Example 4: Custom analysis with different polynomial degrees."""
+    print("\n" + "="*70)
+    print("EXAMPLE 4: Comparing Polynomial Degrees")
+    print("="*70)
+    
+    df = pd.read_excel("SS316H-rupture.xlsx", sheet_name="Rupture")
+    df = standardize_columns(df)
+    
+    degrees = [2, 3, 4, 5]
+    results = []
+    
+    print("\nTesting polynomial degrees:", degrees)
+    
+    for deg in degrees:
+        model = fit_sindy_lmp_model(
+            df, 
+            C=20.0, 
+            poly_degree=deg,
+            threshold=0.01
+        )
+        results.append(model)
+        print(f"  Degree {deg}: Test R² = {model.test_r2:.4f}, "
+              f"CV R² = {model.cv_mean:.4f} ± {model.cv_std:.4f}")
+    
+    # Find best
+    best_idx = np.argmax([r.cv_mean for r in results])
+    best_degree = degrees[best_idx]
+    
+    print(f"\nBest polynomial degree: {best_degree}")
+    print(f"Equation:")
+    results[best_idx].model.print()
+
+
+def example_visualization():
+    """Example 5: Create comprehensive visualizations."""
+    print("\n" + "="*70)
+    print("EXAMPLE 5: Generating Visualizations")
+    print("="*70)
+    
+    df = pd.read_excel("SS316H-rupture.xlsx", sheet_name="Rupture")
+    df = standardize_columns(df)
+    
+    # Fit model
+    model = fit_sindy_lmp_model(df, C=20.0, poly_degree=3)
+    
+    print("\nCreating diagnostic plots...")
+    plot_model_performance(df, model, save_path="diagnostics.png")
+    print("Saved: diagnostics.png")
+
+
+def example_sensitivity_analysis():
+    """Example 6: Analyze prediction sensitivity to temperature and stress."""
+    print("\n" + "="*70)
+    print("EXAMPLE 6: Sensitivity Analysis")
+    print("="*70)
+    
+    df = pd.read_excel("SS316H-rupture.xlsx", sheet_name="Rupture")
+    df = standardize_columns(df)
+    
+    model = fit_sindy_lmp_model(df, C=20.0)
+    
+    # Base condition
+    T_base = 873.0  # K
+    stress_base = 200.0  # MPa
+    t_base = predict_rupture_time(T_base, stress_base, model)
+    
+    print(f"\nBase condition: T={T_base}K, σ={stress_base}MPa")
+    print(f"Rupture time: {t_base:.1f} hours\n")
+    
+    # Temperature sensitivity
+    print("Temperature sensitivity (+/- 50K):")
+    for dT in [-50, -25, 0, 25, 50]:
+        T = T_base + dT
+        t = predict_rupture_time(T, stress_base, model)
+        change = 100 * (t - t_base) / t_base
+        print(f"  T={T:.0f}K: {t:.1f}h ({change:+.1f}%)")
+    
+    # Stress sensitivity
+    print("\nStress sensitivity (+/- 50MPa):")
+    for dS in [-50, -25, 0, 25, 50]:
+        stress = stress_base + dS
+        t = predict_rupture_time(T_base, stress, model)
+        change = 100 * (t - t_base) / t_base
+        print(f"  σ={stress:.0f}MPa: {t:.1f}h ({change:+.1f}%)")
+
+
+def example_design_curve():
+    """Example 7: Generate design curve for specific temperature."""
+    print("\n" + "="*70)
+    print("EXAMPLE 7: Design Curve Generation")
+    print("="*70)
+    
+    df = pd.read_excel("SS316H-rupture.xlsx", sheet_name="Rupture")
+    df = standardize_columns(df)
+    
+    model = fit_sindy_lmp_model(df, C=20.0)
+    
+    # Generate curve for T=873K (600°C)
+    T = 873.0
+    stresses = np.linspace(100, 300, 20)
+    times = [predict_rupture_time(T, s, model) for s in stresses]
+    
+    curve_df = pd.DataFrame({
+        'Stress [MPa]': stresses,
+        'Rupture Time [h]': times,
+        'Rupture Time [years]': [t/8760 for t in times]
+    })
+    
+    print(f"\nDesign curve for T={T}K ({T-273.15:.0f}°C):")
+    print(curve_df.to_string(index=False))
+    
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.semilogy(stresses, times, 'o-', linewidth=2, markersize=6)
+    plt.xlabel('Stress [MPa]', fontsize=12)
+    plt.ylabel('Rupture Time [hours]', fontsize=12)
+    plt.title(f'Design Curve at T = {T}K ({T-273.15:.0f}°C)', fontsize=14)
+    plt.grid(True, alpha=0.3, which='both')
+    plt.tight_layout()
+    plt.savefig('design_curve.png', dpi=300)
+    print("\nSaved: design_curve.png")
+    plt.show()
+
+
+if __name__ == "__main__":
+    """
+    Run specific examples by uncommenting the desired function calls.
+    """
+    
+    # Or run all examples:
+    print("\n" + "#"*70)
+    print("# CREEP RUPTURE PREDICTION - EXAMPLE USAGE")
+    print("#"*70)
+    
+    try:
+        example_basic_workflow()
+        example_batch_predictions()
+        example_custom_analysis()
+        example_sensitivity_analysis()
+    
+        
+    except FileNotFoundError:
+        print("\nError: SS316H-rupture.xlsx not found.")
+        print("Please ensure the data file is in the current directory.")
+    except Exception as e:
+        print(f"\nError running examples: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\n" + "#"*70)
+    print("# EXAMPLES COMPLETE")
+    print("#"*70)
