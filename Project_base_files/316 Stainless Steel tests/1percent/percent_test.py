@@ -18,7 +18,7 @@ from pathlib import Path
 # Load data
 csv_path = Path(__file__).parent / "SS316H-1percent.csv"
 df = pd.read_csv(csv_path)
-A
+
 print("="*80)
 print("SS316H CREEP MODEL - FINAL OPTIMIZED VERSION")
 print("="*80)
