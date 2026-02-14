@@ -63,6 +63,12 @@ For each commit that fixes a specific issue should be label the issue’s number
   - Be reviewed and approved by at least one teammate
   - Include a descriptive title and link to the related issue
 
+## How to Run CI checks
+  - python -m pytest Unit_testing/
+  - python -m flake8 "Folder/File_path"
+  - python -m black "Folder/File_path"
+    - Add --check after black if you don't want auto correct formatting
+
 ## Security & Secrets
 
 - Do not commit secrets or credentials.
