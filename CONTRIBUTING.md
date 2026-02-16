@@ -1,95 +1,303 @@
-# Contributing Guide
+# Contributing to Sparse-Identification-of-Nonlinear-Dynamic-Systems
 
-How to set up, code, test, review, and release so contributions meet our Definition of Done.
+Repository:
+[https://github.com/PNG5042/Sparse-Identification-of-Nonlinear-Dynamic-Systems](https://github.com/PNG5042/Sparse-Identification-of-Nonlinear-Dynamic-Systems)
 
-## Code of Conduct
+Thank you for contributing to this project. This guide explains how to set up the project locally, how to follow our contribution workflow, and how we enforce quality standards.
 
-Don't be reckless when committing code to the main branch.
-Be respectful, communicate openly, and resolve conflicts constructively.  
-To report behavior concerns, contact the team lead via private Discord or email.
+Please read this document before submitting a Pull Request (PR).
 
-## Getting Started
+---
 
-- Python 3.10+
-- pip install -r requirements.txt
-- Git and GitHub account
+# 1. Prerequisites & Local Setup
 
-## Branching & Workflow
+## 1.1 Prerequisites
 
-Enforce clean commits, consistent naming, and updated documentation
+* Python 3.10 or newer
+* Git
+* pip
+* Virtual environment tool (venv recommended)
 
-- Clean Commits
-  - If adding brand new feature create new branch base one main
-  - If adding onto another branch base it one that branch instead
-  - When committing do -Updating / feat to make it clear if you’re adding a new feat or simplie updating something
+---
 
-- Consistent naming
-  - As stated before, use the same words like 'updating' if you are simplifying or changing something to keep things clear. 
-  - For example, instead of everyone using -Adding, Feat, Function to show adding a new feature, just use -Feat. Simple and easy
+## 1.2 Clone the Repository
 
-- Update Documentation
-  - As we continue to work on the program, make sure to update how to run your program as you go on another new branch to update the README, CONTRIB, etc. 
-  - Better to do little by little over time than all of it at once.
+```bash
+git clone https://github.com/PNG5042/Sparse-Identification-of-Nonlinear-Dynamic-Systems.git
+cd Sparse-Identification-of-Nonlinear-Dynamic-Systems
+```
 
+---
 
-## Issues & Planning
+## 1.3 Create and Activate Virtual Environment
 
--Each new bug, version, or document change will be posted on the GitHub project with a clear label and description
--Labels could be: bugs, enhancement, documentation, high priority
+### macOS / Linux
 
-## Commit Messages
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
 
-We use the Conventional Commits convention for all commit messages to ensure clarity and consistency.
-- Use bullet points of what change/added/deleted, etc
+### Windows
 
-Examples:
-- updated 1% test
-  - divided data to short/long test
-  - use 5 different test methods
-  - pick best one
-  - Improve accuracy
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
 
-For each commit that fixes a specific issue should be label the issue’s number so we know which exact bug was fixed.
+---
 
-## Testing
+## 1.4 Install Dependencies
 
-- Currently, you will have to run it manumal by running each python program in the ternimal
-(plan to change later in the future)
+```bash
+pip install -r requirements.txt
+```
 
-## Pull Requests & Reviews
+If requirements.txt is not available:
 
-- Each PR must:
-  - Pass all CI checks (lint, tests, build)
-  - Be reviewed and approved by at least one teammate
-  - Include a descriptive title and link to the related issue
+```bash
+pip install pytest flake8 black pysindy
+```
 
-## How to Run CI checks
-  - python -m pytest Unit_testing/
-  - python -m flake8 "Folder/File_path"
-  - python -m black "Folder/File_path"
-    - Add --check after black if you don't want auto correct formatting
+---
 
-## Security & Secrets
+## 1.5 Run the Project
 
-- Do not commit secrets or credentials.
-- Use environment variables or `.env` (excluded via .gitignore).
-- Report vulnerabilities privately to the team lead.
+Example:
 
-## Documentation Expectations
+```bash
+python main.py
+```
 
-- Update README if setup or dependencies change.
-- Add/maintain docstrings for all functions/classes.
-- Use markdown in `/docs` for project-level documentation.
+---
 
+# 2. Running Tests, Linters, and Formatters Locally
 
-## Release Process
+All contributors must run checks locally before submitting a PR.
 
-- Semantic versioning (vMAJOR.MINOR.PATCH)
-- Tag releases on GitHub (e.g., `v1.0.0`)
-- Update CHANGELOG.md with summary of fixes/features.
+---
 
-## Support & Contact
+## 2.1 Run Unit Tests
 
-Questions or issues?  
-Open a GitHub issue with label `question` or message using Email
-Expected response: within 24 hours.
+```bash
+pytest Unit_Testing/
+```
+
+All tests must pass before opening a PR.
+
+---
+
+## 2.2 Check Test Coverage (if enabled)
+
+```bash
+pytest --cov=.
+```
+
+Minimum required coverage: **80%**
+
+---
+
+## 2.3 Run Linter (Flake8)
+
+```bash
+flake8 .
+```
+
+There must be **zero linting errors**.
+
+---
+
+## 2.4 Run Formatter (Black)
+
+Auto-format:
+
+```bash
+black .
+```
+
+Check formatting only:
+
+```bash
+black --check .
+```
+
+All files must pass formatting checks before merge.
+
+---
+
+## 2.5 CI Enforcement
+
+GitHub Actions runs automatically on every Pull Request.
+
+Merge is blocked if:
+
+* Tests fail
+* Coverage drops below 80%
+* Flake8 fails
+* Black fails
+* Security vulnerabilities are detected
+
+Branch protection rules prevent direct pushes to `main`.
+
+---
+
+# 3. Contribution Workflow
+
+## 3.1 Create a Branch
+
+Always branch from `main`:
+
+```bash
+git checkout main
+git pull
+git checkout -b feature/short-description
+```
+
+Branch naming conventions:
+
+* `feature/<description>`
+* `bugfix/<description>`
+* `refactor/<description>`
+* `docs/<description>`
+
+Example:
+
+```bash
+feature/add-316-rupture-test
+```
+
+---
+
+## 3.2 Making Changes
+
+When contributing:
+
+* Write clear, modular code
+* Add or update unit tests
+* Update documentation if behavior changes
+* Remove TODO comments before submission
+* Keep PRs small and focused
+
+---
+
+## 3.3 Definition of Done (DoD)
+
+Before opening a PR, confirm:
+
+* Feature satisfies issue acceptance criteria
+* Unit tests added for new logic
+* All tests pass
+* ≥ 80% coverage maintained
+* Flake8 passes
+* Black passes
+* Documentation updated if applicable
+* No critical security vulnerabilities
+* PR reviewed by at least 1 team member
+
+If any condition is unmet, the PR will not be approved.
+
+---
+
+## 3.4 Opening a Pull Request
+
+When opening a PR:
+
+1. Link the related issue (e.g., `Closes #12`)
+2. Provide:
+
+   * Summary of changes
+   * Rationale
+   * Testing performed
+   * Screenshots (if graphs/output changed)
+3. Confirm all local checks passed
+
+---
+
+## 3.5 Code Review Expectations
+
+* Minimum 1 approval required
+* Reviewers verify:
+
+  * Code clarity
+  * Correctness
+  * Test coverage
+  * Documentation updates
+  * CI passing
+* Reviews must focus on behavior and quality (not personal critique)
+* PRs should be reviewed within 48 hours
+
+Large PRs may be requested to split into smaller changes.
+
+---
+
+# 4. Reporting Bugs & Requesting Changes
+
+All bugs and feature requests must be submitted via GitHub Issues:
+
+[https://github.com/PNG5042/Sparse-Identification-of-Nonlinear-Dynamic-Systems/issues](https://github.com/PNG5042/Sparse-Identification-of-Nonlinear-Dynamic-Systems/issues)
+
+---
+
+## 4.1 Bug Report Must Include
+
+* Clear descriptive title
+* Steps to reproduce
+* Expected behavior
+* Actual behavior
+* Environment details (OS, Python version)
+* Logs or screenshots if applicable
+
+---
+
+## 4.2 Feature Request Must Include
+
+* Problem description
+* Proposed solution
+* Impact on the system
+* Supporting research/data if relevant
+
+Incomplete issues may be returned for clarification.
+
+---
+
+# 5. Where to Ask for Help
+
+For assistance:
+
+* Primary: Team Discord channel
+* Secondary: Comment on the relevant GitHub Issue
+* Contact:
+
+  * Team Lead for coordination issues
+  * Tech Lead for architecture questions
+  * QA Owner for testing/CI questions
+
+Response target: within 24 hours.
+
+---
+
+# 6. Professional Conduct
+
+All contributors must:
+
+* Maintain respectful and professional communication
+* Use evidence-based discussion during reviews
+* Follow inclusive participation norms
+* Adhere to the Team Charter conflict resolution process
+
+---
+
+# 7. PR Submission Checklist
+
+Before submitting:
+
+* Tests added/updated
+* Tests pass
+* Coverage ≥ 80%
+* Flake8 passes
+* Black passes
+* Documentation updated
+* Issue linked
+* PR is focused and scoped
+
+---
