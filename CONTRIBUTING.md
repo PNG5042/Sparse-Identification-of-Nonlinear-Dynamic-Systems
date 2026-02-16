@@ -264,7 +264,7 @@ Incomplete issues may be returned for clarification.
 
 For assistance:
 
-* Primary: Team Discord channel
+* Primary: Emails 
 * Secondary: Comment on the relevant GitHub Issue
 * Contact:
 
