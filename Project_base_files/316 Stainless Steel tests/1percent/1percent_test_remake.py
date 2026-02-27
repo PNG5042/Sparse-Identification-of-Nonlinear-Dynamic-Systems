@@ -506,7 +506,7 @@ fig.suptitle("SS316H Creep – SINDy Applicability Study\n"
              "Sparse Equation Discovery · Similarity Metric · Error Propagation",
              fontsize=14, fontweight='bold', color=C1, y=0.998)
 
-plt.savefig(OUT/"sindy_analysis.png", dpi=150, bbox_inches='tight', facecolor=DARK)
+plt.savefig(OUT/"sindy_analysis.png", dpi=150, bbox_inches=None, facecolor=DARK)
 plt.close()
 print("  Saved: sindy_analysis.png")
 
