@@ -1,0 +1,12 @@
+Flow stress vs strain rate (power-law relation): σ = Kε˙^m
+Where: 
+- σ = flow stress (MPa) at a chosen strain
+- ε˙= strain rate (1/s)
+- K = material strength coefficient
+- m = strain-rate sensitivity exponent
+
+Because the relationship is nonlinear, the code converts it to a log–log linear equation: ln(σ) = m ln(ε˙) + ln(K)
+So: 
+- Slope = m
+- Intercept = ln(K)
+
