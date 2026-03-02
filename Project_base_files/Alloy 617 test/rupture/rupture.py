@@ -17,7 +17,7 @@ from creep_rupture_sindy import (
 def load_alloy617_from_excels(
     folder_or_files,
     sheet_name="Rupture",
-    file_glob="*.xlsx",
+    file_glob="*.csv",
     allow_all_sheets_fallback=True,
 ):
     """
