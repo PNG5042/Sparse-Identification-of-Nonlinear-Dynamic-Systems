@@ -6,35 +6,44 @@ from pysindy.feature_library import PolynomialLibrary
 from scipy.optimize import curve_fit  
 from sklearn.metrics import r2_score  
 
-AGG = "median"                 
+# AGG: how to combine multiple specimens at the same strain rate (median vs mean).
+AGG = "median"   
+
+# MIN_RATES_FOR_FIT: you need at least 2 distinct strain rates to fit a line in log–log space.
 MIN_RATES_FOR_FIT = 2          
 
-
+# MIN_SPECIMENS_PER_RATE: desired minimum number of specimens per strain rate.
 MIN_SPECIMENS_PER_RATE = 2
 
+# SAFE_MIN_PCT, SAFE_MAX_PCT: a “safe” strain range (in percent) where curves are reliable for interpolation.
 SAFE_MIN_PCT = 0.20
 SAFE_MAX_PCT = 2.00
+
+# REQUESTED_TARGET_STRAIN_PCT: user’s preferred target strain (5%).
 REQUESTED_TARGET_STRAIN_PCT = 5.0  
 
+# DROP_NEGATIVE_STRAIN: flag saying we don’t want negative strain points.
 DROP_NEGATIVE_STRAIN = True
 
 
 # =========================================================
 # LOAD + CLEAN
 # =========================================================
+# Reads the CSV file.
+# Keeps only these columns: specimen ID, strain rate, strain (%), stress (MPa).
 df = pd.read_csv(r"C:\Users\Admin\Documents\GitHub\Sparse-Identification-of-Nonlinear-Dynamic-Systems\Project_base_files\Alloy 617 Test\Strain-rate-sensitivity\SGIHX_A5_DETAIL_DATA.csv")
-
 needed = ["Specimen_Name", "Nominal_Strain_Rate", "Strain_percent", "Stress_MPa"]
 df = df[needed].copy()
 
+# Forces these fields to numeric, turning invalid values into NaN.
+# Drops any rows with NaN in those columns.
 df["Nominal_Strain_Rate"] = pd.to_numeric(df["Nominal_Strain_Rate"], errors="coerce")
 df["Strain_percent"] = pd.to_numeric(df["Strain_percent"], errors="coerce")
 df["Stress_MPa"] = pd.to_numeric(df["Stress_MPa"], errors="coerce")
 df = df.dropna(subset=needed)
 
+# Keeps only positive strain rates, positive stress, and non-negative strain.
 df = df[(df["Nominal_Strain_Rate"] > 0) & (df["Stress_MPa"] > 0)].copy()
-
-# recommended: remove tiny negative strain points
 df = df[df["Strain_percent"] >= 0].copy()
 
 print("=== Data summary ===")
@@ -48,14 +57,19 @@ print(f"Unique strain rates: {df["Nominal_Strain_Rate"].nunique()}")
 # CORE FUNCTIONS
 # =========================================================
 def interp_stress_at_strain(curve_df: pd.DataFrame, target_strain_pct: float) -> float:
+    # Extracts arrays of strain (x) and stress (y).
     x = curve_df["Strain_percent"].to_numpy(float)
     y = curve_df["Stress_MPa"].to_numpy(float)
 
+    # Sorts by strain.
+    # Removes duplicate strain values, keeping the first.
     order = np.argsort(x)
     x, y = x[order], y[order]
     x_u, idx = np.unique(x, return_index=True)
     y_u = y[idx]
 
+    # Needs at least 2 points.
+    # Target strain must be within the observed strain range for that curve.
     if x_u.size < 2:
         raise ValueError("Not enough points to interpolate.")
     if target_strain_pct < x_u.min() or target_strain_pct > x_u.max():
@@ -66,6 +80,7 @@ def interp_stress_at_strain(curve_df: pd.DataFrame, target_strain_pct: float) ->
 
 def flow_stress_by_rate_at_strain(df_all: pd.DataFrame, target_strain_pct: float, agg: str = "median", min_specimens_per_rate: int = 1,) -> pd.DataFrame:
     rows = []
+    # Loops over each specimen × strain rate combination.
     for (spec, rate), g in df_all.groupby(["Specimen_Name", "Nominal_Strain_Rate"], sort=False):
         try:
             sigma = interp_stress_at_strain(g, target_strain_pct)
@@ -98,7 +113,9 @@ def flow_stress_by_rate_at_strain(df_all: pd.DataFrame, target_strain_pct: float
 
     return out
 
-
+# Because the relationship is nonlinear, the code converts it to a log–log linear equation: 
+# ln(σ) = m ln(ε˙) + ln(K)
+# Slope = m & Intercept = ln(K)
 def fit_m_from_rate_stress(rate_stress: pd.DataFrame):
     rates = rate_stress["Nominal_Strain_Rate"].to_numpy(float)
     sigmas = rate_stress["flow_stress_MPa"].to_numpy(float)
