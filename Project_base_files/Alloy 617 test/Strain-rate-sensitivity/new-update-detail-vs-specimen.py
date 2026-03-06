@@ -159,26 +159,17 @@ for (T, rate), g in merged.groupby([TEMP_COL, RATE_COL]):
 
     # compute metric
     if ANALYTICAL_COEFS:
-
         for feat, a_true in ANALYTICAL_COEFS.items():
-
             if a_true == 0:
                 continue
 
             s_coef = coef_map.get(feat,0)
-
             rel, metric = compute_metric(a_true, s_coef)
 
             print(f"Metric {feat}: analytical={a_true}, sindy={s_coef}, metric={metric}")
 
             metric_rows.append({
-                "Temperature":T,
-                "Rate":rate,
-                "feature":feat,
-                "analytical":a_true,
-                "sindy":s_coef,
-                "relative_error":rel,
-                "metric":metric
+                "Temperature":T, "Rate":rate, "feature":feat, "analytical":a_true, "sindy":s_coef, "relative_error":rel, "metric":metric
             })
 
 
