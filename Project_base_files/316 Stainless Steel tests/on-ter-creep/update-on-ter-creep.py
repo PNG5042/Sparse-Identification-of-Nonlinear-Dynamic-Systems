@@ -101,7 +101,7 @@ def evaluate_model(name, y_test_log, y_pred_h, y_pred_log):
     y_true_h = np.exp(y_test_log)
     y_pred_log = np.log(y_pred_h)
 
-    print("===== Metrics (hours) =====")
+    print("\n===== Metrics (hours) =====")
     print(f"MAE  = {mean_absolute_error(y_true_h, y_pred_h):.3f} h")
     print(f"MAPE = {mean_absolute_percentage_error(y_true_h, y_pred_h)*100:.2f} %")
 
