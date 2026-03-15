@@ -47,7 +47,7 @@ df["temp_sq"] = df["temp_k"] ** 2
 # =========================================================
 # ONE-HOT ENCODE HEAT
 # =========================================================
-df_encoded = pd.get_dummies(df, columns=["heat"], drop_first=True)
+df_encoded = pd.get_dummies(df, columns=["heat"], drop_first=False)
 
 # =========================================================
 # FINAL FEATURE MATRIX
