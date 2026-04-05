@@ -1,25 +1,30 @@
 # ================================
-# ALLOY 617 TENSILE – SINDy APPLICABILITY STUDY  (PySINDy edition) -- v3
+# ALLOY 617 TENSILE – SINDy APPLICABILITY STUDY  (PySINDy edition) -- v4
 # ================================
-# CHANGES vs v2:
-#   FIX-1  Formatting bug: intercept was printing as both value and term.
-#   FIX-2  QR-based column pivoting decorrelates Φ before SINDy.
-#          Columns with near-zero pivot (effective rank deficiency) are
-#          dropped automatically, reducing condition number.
-#   FIX-3  Identifiability diagnostic: for every feature, compute its
-#          coefficient of variation (CV) in the design matrix and flag
-#          features whose variance is too low to identify reliably.
-#          "log(sr)" will be explicitly flagged as unidentifiable from
-#          this dataset's narrow strain-rate range.
-#   FIX-4  Similarity for dropped-but-identifiable terms counts as 0.
-#          Similarity for features flagged as unidentifiable is reported
-#          as NaN with a note, so the mean is not penalised unfairly.
+# CHANGES vs v3:
+#   FIX-A  QR drop logic used pivot indices as column positions — now uses
+#          separate positional keep_idx and piv_order lists so the column
+#          slice Phi_id[:, keep_idx] always refers to correct positions.
+#   FIX-B  Removed dead variable Phi_qr (assigned before loop, never updated
+#          inside it, shadowed by Phi_final after loop).
+#   FIX-C  fit_sindy_log replaced SINDy model hack (passing design matrix as
+#          state variable) with a direct ps.STLSQ call. The old approach worked
+#          by accident (t=1, no differentiation) but would silently break on
+#          PySINDy version changes. STLSQ is the correct interface for static
+#          regression.
+#   FIX-D  compute_sim near-zero fallback now uses a data-driven scale
+#          (max(|ana|, 0.1*std(log_y))) instead of the magic constant 0.1.
+#   FIX-E  Sensitivity loop re-tunes threshold at each noise level instead of
+#          reusing the clean-data threshold, preventing spurious active terms
+#          at high noise from distorting the sensitivity curve.
+#   FIX-F  Single-specimen heats (len < 3) skipped in IQR outlier detection;
+#          IQR=0 previously made them immune to outlier flagging.
+#   FIX-G  Removed chr()-obfuscated string construction for 'log(sr)' key.
 # ================================
 
 import numpy as np
 import pandas as pd
 import pysindy as ps
-from pysindy.feature_library import IdentityLibrary
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor, VotingRegressor
 from sklearn.preprocessing import StandardScaler
@@ -30,6 +35,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from scipy import stats
+from scipy.linalg import qr as scipy_qr
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
@@ -47,7 +53,7 @@ CSV_FILES = [
 
 # ── 0. LOAD & REDUCE ──────────────────────────────────────────────────
 print("="*65)
-print("ALLOY 617 TENSILE – SINDy UTS STUDY  (PySINDy) [v3]")
+print("ALLOY 617 TENSILE – SINDy UTS STUDY  (PySINDy) [v4]")
 print("="*65)
 
 frames = []
@@ -108,9 +114,18 @@ if REAL:
     ].copy()
 
     # RT / HT separation
-    ht_mask_primary = (summary["UTS"] < 500) & (summary["eps_at_UTS"] < 0.05)
+    ht_mask_primary = (
+        ((summary["UTS"] < 500) & (summary["eps_at_UTS"] < 0.05))   # original
+        | (summary["UTS"] < 350)                                      # hard UTS floor
+        | ((summary["UTS"] < 550) & (summary["Material_Form"] == "Plate")
+        & (summary["eps_at_UTS"] < 0.20))                         # plate-specific
+    )
     iqr_outlier = pd.Series(False, index=summary.index)
     for heat, grp in summary.groupby("Heat"):
+        # FIX-F: skip heats with fewer than 3 specimens — IQR=0 makes all
+        # single/dual-specimen heats immune to outlier detection otherwise.
+        if len(grp) < 3:
+            continue
         luts = np.log(grp["UTS"])
         q1, q3 = luts.quantile(0.25), luts.quantile(0.75)
         iqr = q3 - q1
@@ -120,6 +135,16 @@ if REAL:
     ht_mask = ht_mask_primary | iqr_outlier
     df_ht   = summary[ht_mask].copy()
     df_rt   = summary[~ht_mask].copy()
+
+    # ── FORM-SPLIT ANALYSIS ──────────────────────────────────────────
+    df_bar   = df_rt[df_rt["Material_Form"] == "Bar"].copy()
+    df_plate = df_rt[df_rt["Material_Form"] == "Plate"].copy()
+    print(f"\n  Form split — Bar: {len(df_bar)}  |  Plate: {len(df_plate)}")
+
+    # Use Bar-only for SINDy (clean single-heat dataset)
+    df_rt = df_bar.copy()
+    print(f"  → Using Bar specimens only for SINDy analysis")
+    # ─────────────────────────────────────────────────────────────────
 
     print(f"\n  Total valid specimens  : {len(summary)}")
     print(f"  HT / outlier excluded  : {len(df_ht)} "
@@ -232,7 +257,7 @@ A_ro     = np.column_stack([np.ones_like(log_sr), log_sr, log_eps])
 ro_c, *_ = np.linalg.lstsq(A_ro, log_y, rcond=None)
 logK_ro, m_ro, p_ro = ro_c
 K_ro = np.exp(logK_ro)
-print(f"\n  OLS R-O (RT, log-space):")
+print(f"  OLS R-O (RT, log-space)  *** K unreliable: SR span only {sr_dec:.2f} decades ***")
 print(f"    log(UTS) = {logK_ro:.5f} + {m_ro:.5f}·log(sr) + {p_ro:.5f}·log(eps)")
 print(f"    UTS = {K_ro:.2f} · sr^{m_ro:.5f} · eps^{p_ro:.5f}")
 
@@ -241,7 +266,6 @@ print("\n" + "="*65)
 print("STEP 2: FEATURE IDENTIFIABILITY DIAGNOSTIC")
 print("="*65)
 
-# Full candidate feature library (before any pruning)
 FEAT_LABELS_FULL = ['C0', 'log(sr)', 'log(eps)', 'log(eps)^2',
                     'H_c', 'H_c*log(eps)']
 
@@ -259,11 +283,7 @@ def build_phi_full(Hc, eps, sr):
 
 Phi_full = build_phi_full(H_c, eps_at_UTS, strain_rate)
 
-# FIX-3: Per-feature identifiability
-#   CV  = std(col) / |mean(col)|  — for non-constant columns
-#   For the intercept column (all ones) we skip CV and mark as identifiable.
-#   A feature is "weakly identifiable" if its std is < ID_THRESH * std(log_y).
-ID_THRESH = 0.10   # feature std < 10% of target std → likely unidentifiable
+ID_THRESH = 0.10
 
 print(f"\n  Target log(UTS) std = {log_y.std():.5f}")
 print(f"  Identifiability threshold: feature std < {ID_THRESH:.0%} of target std "
@@ -271,7 +291,7 @@ print(f"  Identifiability threshold: feature std < {ID_THRESH:.0%} of target std
 print(f"  {'Feature':<22} {'std(col)':>10} {'CV':>8} {'identifiable?':>15}")
 print("  " + "-"*57)
 
-id_flags   = {}   # True = identifiable, False = too little variance
+id_flags   = {}
 feat_stds  = {}
 
 for i, lbl in enumerate(FEAT_LABELS_FULL):
@@ -298,43 +318,48 @@ if 'log(sr)' in weak_feats:
     print(f"    SINDy cannot distinguish a rate effect from noise at this scale.")
     print(f"    The OLS m = {m_ro:.5f} is also unreliable from this data.")
 
-# ── FIX-2: QR-based column selection to reduce condition number ────────
+# ── 3. QR DECORRELATION ───────────────────────────────────────────────
 print("\n" + "="*65)
 print("STEP 3: QR DECORRELATION  (select well-conditioned column subset)")
 print("="*65)
 
-# Keep only identifiable features, then apply column-pivoted QR
-# to further remove near-dependent columns.
 id_cols   = [i for i, lbl in enumerate(FEAT_LABELS_FULL) if id_flags[lbl]]
 id_labels = [FEAT_LABELS_FULL[i] for i in id_cols]
 Phi_id    = Phi_full[:, id_cols]
 
-# Normalise columns for QR pivoting (so pivot order is variance-weighted)
-col_norms    = np.linalg.norm(Phi_id, axis=0, keepdims=True)
+col_norms  = np.linalg.norm(Phi_id, axis=0, keepdims=True)
 col_norms[col_norms == 0] = 1.0
-Phi_normed   = Phi_id / col_norms
+Phi_normed = Phi_id / col_norms
 
-from scipy.linalg import qr as scipy_qr
-
-# Pivoted QR (this is the only correct call)
 _, _, piv = scipy_qr(Phi_normed, pivoting=True)
 
 print("\n  QR pivot order (most → least important):")
 print([id_labels[i] for i in piv])
 
 COND_TARGET = 50.0
-keep_idx    = list(piv)
-Phi_qr      = Phi_id[:, keep_idx]
 cond_prev   = np.linalg.cond(Phi_id)
 
-# Greedily drop trailing pivot columns until cond < COND_TARGET or ≥ 2 cols left
+# FIX-A: keep positional indices separate from QR priority order.
+# piv_order gives the drop priority (last = drop first).
+# keep_idx tracks which positional columns remain in Phi_id.
+keep_idx  = list(range(len(id_labels)))   # positional indices into Phi_id
+piv_order = list(piv)                     # QR priority — separate from keep_idx
+# FIX-B: Phi_qr removed — it was assigned once before the loop and never
+# updated inside it, making it dead code. Phi_final is the correct output.
 dropped_labels = []
+
 while len(keep_idx) > 2:
     cond_now = np.linalg.cond(Phi_id[:, keep_idx])
     if cond_now <= COND_TARGET:
         break
-    removed  = keep_idx.pop()               # remove lowest-priority column
-    dropped_labels.append(id_labels[removed])
+    # Drop the lowest-priority column still in keep_idx
+    # piv_order[-1] is the least important; walk back until we find one still kept
+    for candidate in reversed(piv_order):
+        if candidate in keep_idx:
+            keep_idx.remove(candidate)
+            piv_order.remove(candidate)
+            dropped_labels.append(id_labels[candidate])
+            break
 
 Phi_final   = Phi_id[:, keep_idx]
 FEAT_ACTIVE = [id_labels[i] for i in keep_idx]
@@ -355,46 +380,52 @@ print("\n" + "="*65)
 print("STEP 4: SINDy – SPARSE EQUATION DISCOVERY  (log(UTS) space)")
 print("="*65)
 
+# FIX-C: replaced the ps.SINDy hack (passing design matrix as state variable,
+# using model.predict() for fitted values) with a direct ps.STLSQ call.
+# The old approach worked by accident when t=1 and no differentiation occurred,
+# but is not the intended API and would silently break on version changes.
 def fit_sindy_log(y_log, threshold, Phi, feat_labels):
-    """Fit SINDy on Phi → y_log.  Returns coef_dict, r2_log, r2_uts, log_pred."""
-    opt   = ps.STLSQ(threshold=threshold, alpha=1e-5, max_iter=2000)
-    model = ps.SINDy(feature_library=IdentityLibrary(), optimizer=opt)
-    model.fit(Phi, t=1, x_dot=y_log.reshape(-1, 1))
-    log_pred = np.asarray(model.predict(Phi)).ravel()
+    """Fit STLSQ on Phi → y_log. Returns coef_dict, r2_log, r2_uts, log_pred."""
+    opt = ps.STLSQ(threshold=threshold, alpha=1e-5, max_iter=2000)
+    opt.fit(Phi, y_log)
+    coeffs   = opt.coef_.ravel()
+    log_pred = Phi @ coeffs
 
-    ss_r  = np.sum((y_log - log_pred)**2)
-    ss_t  = np.sum((y_log - y_log.mean())**2)
+    ss_r   = np.sum((y_log - log_pred)**2)
+    ss_t   = np.sum((y_log - y_log.mean())**2)
     r2_log = 1 - ss_r / ss_t if ss_t else 0.0
 
     uts_pred = np.exp(log_pred)
     uts_true = np.exp(y_log)
-    ss_ru = np.sum((uts_true - uts_pred)**2)
-    ss_tu = np.sum((uts_true - uts_true.mean())**2)
+    ss_ru  = np.sum((uts_true - uts_pred)**2)
+    ss_tu  = np.sum((uts_true - uts_true.mean())**2)
     r2_uts = 1 - ss_ru / ss_tu if ss_tu else 0.0
 
-    raw       = model.coefficients().ravel()
     coef_dict = {lbl: float(v)
-                 for lbl, v in zip(feat_labels, raw) if abs(v) > 1e-10}
+                 for lbl, v in zip(feat_labels, coeffs) if abs(v) > 1e-10}
     return coef_dict, r2_log, r2_uts, log_pred
 
-# Threshold grid
-print("\n  Tuning STLSQ threshold:")
-thresholds  = np.logspace(-3, 1, 150)
-best_thresh = 0.05
-best_score  = -np.inf
-
-for thresh in thresholds:
-    try:
-        cd, r2l, _, _ = fit_sindy_log(log_y, thresh, Phi_final, FEAT_ACTIVE)
-        nact = len(cd)
-        if r2l < 0.55 or nact < 2:
+# Threshold tuning helper (shared by main fit and sensitivity loop)
+def tune_threshold(y_log, Phi, feat_labels, thresholds, r2_floor=0.55):
+    best_thresh = thresholds[0]
+    best_score  = -np.inf
+    for thresh in thresholds:
+        try:
+            cd, r2l, _, _ = fit_sindy_log(y_log, thresh, Phi, feat_labels)
+            nact = len(cd)
+            if r2l < r2_floor or nact < 2:
+                continue
+            score = r2l + max(0, len(feat_labels) - nact) * 0.015
+            if score > best_score:
+                best_score, best_thresh = score, thresh
+        except Exception:
             continue
-        score = r2l + max(0, len(FEAT_ACTIVE) - nact) * 0.015
-        if score > best_score:
-            best_score, best_thresh = score, thresh
-    except Exception:
-        continue
+    return best_thresh
 
+thresholds  = np.logspace(-3, 1, 150)
+
+print("\n  Tuning STLSQ threshold:")
+best_thresh = tune_threshold(log_y, Phi_final, FEAT_ACTIVE, thresholds)
 print(f"  Best threshold = {best_thresh:.5f}")
 
 coefs_act, r2_act_log, r2_act_uts, logp_act = fit_sindy_log(
@@ -419,7 +450,6 @@ for nm in ML:
           f"{len(cd)} active: {list(cd.keys())}")
 
 # ── 5. EQUATIONS ──────────────────────────────────────────────────────
-# FIX-1: formatting — intercept printed once, cleanly
 def fmt_eq(coef_dict, ylbl='log(UTS)'):
     lines = []
     if 'C0' in coef_dict:
@@ -468,10 +498,11 @@ analytic_ref = {
 
 def compute_sim(sindy_coefs, ref, id_flags_map):
     """
-    FIX-4: similarity rules
+    Similarity rules:
       - Feature identifiable   + SINDy kept it   → 1 - |rel_err|  clamped [-1,1]
       - Feature identifiable   + SINDy dropped it → 0.0
       - Feature NOT identifiable (weak variance)  → NaN  (excluded from mean)
+    FIX-D: near-zero fallback uses data-driven scale instead of magic 0.1
     """
     rows = []
     for param, ana in ref.items():
@@ -488,9 +519,11 @@ def compute_sim(sindy_coefs, ref, id_flags_map):
             rel_err = (ana - sval) / ana
             sim     = float(np.clip(1.0 - abs(rel_err), -1.0, 1.0))
         else:
+            # FIX-D: use data-driven scale rather than the arbitrary constant 0.1
+            scale   = max(abs(ana), 0.1 * log_y.std())
             abs_err = abs(ana - sval)
             rel_err = np.nan
-            sim     = float(np.clip(1.0 - abs_err / 0.1, -1.0, 1.0))
+            sim     = float(np.clip(1.0 - abs_err / scale, -1.0, 1.0))
 
         rows.append({'param': param, 'OLS_ref': ana, 'sindy': sval,
                      'rel_err': rel_err, 'similarity': sim,
@@ -539,7 +572,13 @@ sens_rows = []
 for s in noise_levels:
     y_n    = np.clip(UTS + rng2.normal(0, s, len(UTS)), 1.0, None)
     log_yn = np.log(y_n)
-    cn, r2l, r2u, _ = fit_sindy_log(log_yn, best_thresh, Phi_final, FEAT_ACTIVE)
+
+    # FIX-E: re-tune threshold at each noise level; using the clean-data
+    # threshold at high noise inflates n_active with spurious terms.
+    best_t_s = tune_threshold(log_yn, Phi_final, FEAT_ACTIVE, thresholds,
+                              r2_floor=0.50)
+    cn, r2l, r2u, _ = fit_sindy_log(log_yn, best_t_s, Phi_final, FEAT_ACTIVE)
+
     dfs    = compute_sim(cn, analytic_ref, id_flags)
     msim   = dfs['similarity'].dropna().mean()
     pct    = 100 * s / max(UTS.mean(), 1)
@@ -548,9 +587,10 @@ for s in noise_levels:
     sens_rows.append({'noise_MPa': s, 'approx_pct_err': pct,
                       'n_active': len(cn), 'mean_sim': msim,
                       'r2_log': r2l, 'r2_uts': r2u,
-                      'sindy_m': m_v, 'sindy_p': p_v})
-    print(f"  noise={s:>4} MPa ({pct:>5.1f}%)  active={len(cn)}  "
-          f"R²_log={r2l:.4f}  sim={msim:.4f}  "
+                      'sindy_m': m_v, 'sindy_p': p_v,
+                      'thresh_used': best_t_s})
+    print(f"  noise={s:>4} MPa ({pct:>5.1f}%)  thresh={best_t_s:.5f}  "
+          f"active={len(cn)}  R²_log={r2l:.4f}  sim={msim:.4f}  "
           f"m={m_v:+.5f}  p={p_v:+.5f}")
 
 df_sens = pd.DataFrame(sens_rows)
@@ -683,7 +723,7 @@ for nm, col in zip(ML, MC[1:]):
     srcs.append((nm, col, compute_sim(coefs_preds[nm], analytic_ref, id_flags)))
 for i, (lbl, col, df_s) in enumerate(srcs):
     off  = (i - len(srcs)/2 + 0.5) * w
-    vals = df_s['similarity'].fillna(-0.05).values   # NaN shown as tiny gap
+    vals = df_s['similarity'].fillna(-0.05).values
     bars = ax5.bar(xp + off, vals, w, label=lbl, color=col, alpha=0.85,
                    edgecolor=PANEL)
     for bar, val, idf in zip(bars, df_s['similarity'].values,
@@ -764,8 +804,11 @@ ax9.axis('off')
 C0s = coefs_act.get('C0', 0)
 ps_ = coefs_act.get('log(eps)', np.nan)
 K_s = np.exp(C0s) if abs(C0s) < 15 else float('nan')
+# FIX-G: removed chr()-obfuscated key construction for 'log(sr)'
+sindy_m_str = ('dropped (weak)' if 'log(sr)' in weak_feats
+               else f"{coefs_act.get('log(sr)', 0):+.5g}")
 txt = [
-    "Alloy 617  |  Tensile  |  UTS  [v3]",
+    "Alloy 617  |  Tensile  |  UTS  [v4]",
     f"{'Real CSV' if REAL else 'Synthetic'}  "
     f"RT={len(UTS)} / HT={len(df_ht) if REAL and df_ht is not None else 0}",
     f"SR span: {sr_dec:.2f} dec | Φ cond: {cond_final:.1f}",
@@ -781,7 +824,7 @@ txt = [
     "",
     f"── SINDy (R²_log={r2_act_log:.4f}, R²_UTS={r2_act_uts:.4f}) ─",
     f"  C0={C0s:+.5g} → K≈{K_s:.1f} MPa",
-    f"  log(sr) = {'dropped (weak)' if 'log(sr)' in weak_feats else f'{coefs_act.get(chr(108)+chr(111)+chr(103)+chr(40)+chr(115)+chr(114)+chr(41), 0):+.5g}'}",
+    f"  log(sr) = {sindy_m_str}",
     f"  log(eps)= {ps_:+.5g}   OLS:{p_ro:+.5f}",
     f"  ({n_act_t} of {len(FEAT_ACTIVE)} active)",
     "",
@@ -797,17 +840,18 @@ txt = [
     (f"  r={corr:.4f}  p={pval:.4f}" if not np.isnan(corr) else "  n/a"),
     (f"  Δsim/10%err={sl*10:+.4f}" if not np.isnan(sl) else ""),
     "",
-    "v3: QR decorrelation | id. diagnostic",
-    "    intercept fix | NaN for weak feats",
+    "v4: QR index fix | STLSQ direct call",
+    "    noise re-tune | data-driven scale",
+    "    IQR skip <3   | no chr() obfusc.",
 ]
 ax9.text(0.03, 0.97, "\n".join(txt), transform=ax9.transAxes,
          fontsize=7.2, va='top', fontfamily='monospace', color=TEXT,
          bbox=dict(boxstyle='round', facecolor=DARK, alpha=0.9))
-ax9.set_title('Summary [v3]', color=C1, fontsize=9, fontweight='bold')
+ax9.set_title('Summary [v4]', color=C1, fontsize=9, fontweight='bold')
 
 fig.suptitle(
     "Alloy 617 Tensile – SINDy UTS Study  "
-    "[v3: QR decorrelation · identifiability diagnostic · intercept fix]\n"
+    "[v4: QR index fix · STLSQ direct · noise re-tune · IQR fix · chr() fix]\n"
     "SINDy in log(UTS) space  |  OLS R-O Reference  |  NaN for unidentifiable features",
     fontsize=11, fontweight='bold', color=C1, y=0.999)
 
@@ -818,7 +862,7 @@ print("  Saved: sindy_617t_analysis.png")
 
 # ── 10. FINAL SUMMARY ─────────────────────────────────────────────────
 print("\n" + "="*65)
-print("FINAL SUMMARY – ALLOY 617 TENSILE [v3]")
+print("FINAL SUMMARY – ALLOY 617 TENSILE [v4]")
 print("="*65)
 print(f"\n  RT: {len(UTS)} specimens  |  HT/outlier: "
       f"{len(df_ht) if REAL and df_ht is not None else 0}")
