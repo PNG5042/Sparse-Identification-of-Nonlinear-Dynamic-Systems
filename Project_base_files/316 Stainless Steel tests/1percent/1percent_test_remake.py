@@ -1,36 +1,16 @@
 # ================================
-# SS316H CREEP – SINDy APPLICABILITY STUDY  (PySINDy edition) -- v2
+# SS316H CREEP – SINDy APPLICABILITY STUDY  (PySINDy edition) -- v5
 # ================================
-# CHANGES vs v1:
-#   FIX-A  Replaced ps.SINDy hack (IdentityLibrary + x_dot) with direct
-#          ps.STLSQ call — same fix as tensile FIX-C. The old approach
-#          passed the design matrix as the state variable and the target
-#          as x_dot, working only by accident when t=1. STLSQ.fit(Phi, y)
-#          is the correct interface for static regression.
-#   FIX-B  Added identifiability diagnostic (ported from tensile Step 2).
-#          Each feature's std is checked against 10% of target std. Low-
-#          variance features are flagged before QR and excluded from the
-#          similarity mean so they don't penalise the score unfairly.
-#   FIX-C  Added QR-based column decorrelation (ported from tensile Step 3).
-#          The original library had 8 heavily collinear features — without
-#          pivoted QR pruning, STLSQ coefficients cancel/amplify each other
-#          producing physically meaningless values (e.g. 1/T = -209,697
-#          when OLS gives +51,430). Condition number is now checked and
-#          columns dropped until cond <= 50.
-#   FIX-D  Threshold tuning now requires r2 >= 0.65 AND nact < len(features)
-#          (at least one term pruned). Previously the minimum threshold
-#          (0.00010) always won because it maximised R2 by keeping all 8
-#          terms — defeating the purpose of sparse identification.
-#   FIX-E  Sensitivity loop re-tunes threshold per noise level (ported
-#          from tensile FIX-E), preventing the clean-data threshold from
-#          being inappropriately applied at high noise.
-#   FIX-F  OLS reference now includes heat encoding so the intercept C0
-#          is not absorbing inter-heat scatter, making the similarity
-#          comparison against C0 meaningful.
-#   FIX-G  Similarity metric uses identifiability-aware NaN exclusion
-#          (ported from tensile Step 6): unidentifiable features report
-#          NaN and are excluded from the mean rather than dragging it
-#          negative.
+# FIXES vs v2 (cumulative):
+#
+#   FIX-V3-A  Feature-relative identifiability threshold (CV>0.01 or std>1e-4).
+#   FIX-V3-B  Protected set {C0, log(s), 1/T, H_c} never dropped by QR.
+#   FIX-V3-C  Condition target raised 50 → 500.
+#   FIX-V3-D/E OLS-relative similarity with near-zero guard.
+#   FIX-V3-F  Threshold tuning r2 floor lowered to 0.50.
+#   FIX-V4    not_in_library → NaN similarity (library gap ≠ SINDy failure).
+#   FIX-V5    Effect-size similarity guard: |coef|·std(feat)/std(y) < 5% → NaN.
+#             Replaces raw |OLS|<0.01 check. C0 (intercept) is exempt.
 # ================================
 
 import numpy as np
@@ -58,7 +38,7 @@ np.random.seed(42)
 
 # ── 0. DATA ───────────────────────────────────────────────────────────
 print("="*65)
-print("SS316H CREEP – SINDy APPLICABILITY STUDY  [v2]")
+print("SS316H CREEP – SINDy APPLICABILITY STUDY  [v5]")
 print("="*65)
 
 csv_path = BASE / "SS316H-1percent.csv"
@@ -169,8 +149,7 @@ best_ml = max(RES, key=lambda k: RES[k]['te_r2'])
 print(f"\n  Best: {best_ml}  (R²={RES[best_ml]['te_r2']:.4f}, "
       f"err={RES[best_ml]['med_err']:.1f}%)")
 
-# FIX-F: OLS reference includes heat encoding so C0 is not absorbing
-# inter-heat scatter.
+# OLS reference includes heat encoding
 A_nb     = np.column_stack([np.ones_like(Temp), np.log(Stress), 1/Temp, H_c])
 nb_c, *_ = np.linalg.lstsq(A_nb, y_log, rcond=None)
 C_nb, n_nb, QR_nb, h_nb = nb_c
@@ -182,7 +161,6 @@ print("\n" + "="*65)
 print("STEP 2: FEATURE IDENTIFIABILITY DIAGNOSTIC")
 print("="*65)
 
-# Full candidate feature library
 FEAT_LABELS_FULL = ['C0', '1/T', 'log(s)', 'log(s)^2',
                     '1/s', '(1/T)log(s)', 'log(T)', 'Garofalo', 'H_c']
 
@@ -202,12 +180,16 @@ def build_phi_full(T, S, Hc):
 
 Phi_full = build_phi_full(Temp, Stress, H_c)
 
-ID_THRESH = 0.10
-print(f"\n  Target log(t) std = {y_log.std():.5f}")
-print(f"  Identifiability threshold: feature std < {ID_THRESH:.0%} of target std "
-      f"= {ID_THRESH * y_log.std():.5f}\n")
-print(f"  {'Feature':<22} {'std(col)':>10} {'CV':>8} {'identifiable?':>15}")
-print("  " + "-"*57)
+# FIX-V3-A: feature-relative identifiability.
+# A feature is identifiable if its CV > 0.01  OR  raw std > 1e-4.
+# This correctly handles 1/T whose absolute values are tiny but vary
+# meaningfully relative to their own scale.
+CV_THRESH  = 0.01
+STD_THRESH = 1e-4
+
+print(f"\n  Identifiability criteria: CV > {CV_THRESH} OR std > {STD_THRESH}\n")
+print(f"  {'Feature':<22} {'std(col)':>10} {'|mean|':>10} {'CV':>8} {'identifiable?':>15}")
+print("  " + "-"*67)
 
 id_flags  = {}
 feat_stds = {}
@@ -218,14 +200,19 @@ for i, lbl in enumerate(FEAT_LABELS_FULL):
     feat_stds[lbl] = s
     if lbl == 'C0':
         id_flags[lbl] = True
-        print(f"  {'C0':<22} {'(intercept)':>10} {'—':>8} {'YES (fixed)':>15}")
+        print(f"  {'C0':<22} {'(intercept)':>10} {'—':>10} {'—':>8} {'YES (fixed)':>15}")
         continue
-    cv     = s / abs(col.mean()) if abs(col.mean()) > 1e-10 else np.nan
-    ok     = s >= ID_THRESH * y_log.std()
+    mu  = abs(col.mean())
+    cv  = s / mu if mu > 1e-15 else np.nan
+    # FIX-V3-A: use CV threshold, with raw std fallback
+    if not np.isnan(cv):
+        ok = (cv > CV_THRESH) or (s > STD_THRESH)
+    else:
+        ok = s > STD_THRESH
     id_flags[lbl] = ok
-    cv_str = f"{cv:.3f}" if not np.isnan(cv) else "n/a"
+    cv_str = f"{cv:.4f}" if not np.isnan(cv) else "n/a"
     flag   = "YES" if ok else "*** WEAK ***"
-    print(f"  {lbl:<22} {s:>10.5f} {cv_str:>8} {flag:>15}")
+    print(f"  {lbl:<22} {s:>10.5f} {mu:>10.5f} {cv_str:>8} {flag:>15}")
 
 weak_feats = [k for k, v in id_flags.items() if not v]
 print(f"\n  Weakly identifiable features: "
@@ -236,7 +223,13 @@ print("\n" + "="*65)
 print("STEP 3: QR DECORRELATION  (select well-conditioned column subset)")
 print("="*65)
 
-# FIX-C: apply pivoted QR to decorrelate the library before SINDy
+# FIX-V3-B: protect core Norton-Bailey terms + H_c from being dropped.
+# H_c is identifiable (std=3.37) and physically meaningful (heat-to-heat
+# scatter) so it must survive QR pruning even if collinear with others.
+# FIX-V3-C: raise condition target to 500 to retain more features.
+PROTECTED   = {'C0', 'log(s)', '1/T', 'H_c'}
+COND_TARGET = 500.0
+
 id_cols   = [i for i, lbl in enumerate(FEAT_LABELS_FULL) if id_flags[lbl]]
 id_labels = [FEAT_LABELS_FULL[i] for i in id_cols]
 Phi_id    = Phi_full[:, id_cols]
@@ -249,23 +242,27 @@ _, _, piv = scipy_qr(Phi_normed, pivoting=True)
 
 print("\n  QR pivot order (most → least important):")
 print([id_labels[i] for i in piv])
+print(f"  Protected features (never dropped): {sorted(PROTECTED)}")
+print(f"  Condition target: {COND_TARGET}")
 
-COND_TARGET    = 50.0
 cond_prev      = np.linalg.cond(Phi_id)
 keep_idx       = list(range(len(id_labels)))
-piv_order      = list(piv)
+piv_order      = list(piv)   # least important first (we scan reversed)
 dropped_labels = []
 
-while len(keep_idx) > 2:
+# Reverse pivot order = least important last in QR → drop last first
+for candidate in reversed(piv_order):
+    if len(keep_idx) <= 3:
+        break
     cond_now = np.linalg.cond(Phi_id[:, keep_idx])
     if cond_now <= COND_TARGET:
         break
-    for candidate in reversed(piv_order):
-        if candidate in keep_idx:
-            keep_idx.remove(candidate)
-            piv_order.remove(candidate)
-            dropped_labels.append(id_labels[candidate])
-            break
+    lbl = id_labels[candidate]
+    if lbl in PROTECTED:
+        continue   # FIX-V3-B: never drop protected features
+    if candidate in keep_idx:
+        keep_idx.remove(candidate)
+        dropped_labels.append(lbl)
 
 Phi_final   = Phi_id[:, keep_idx]
 FEAT_ACTIVE = [id_labels[i] for i in keep_idx]
@@ -277,7 +274,7 @@ print(f"  Kept   : {FEAT_ACTIVE}")
 print(f"  Dropped: {dropped_labels if dropped_labels else 'none'}")
 if cond_final > COND_TARGET:
     print(f"  *** NOTE: cond still {cond_final:.1f} — "
-          f"inherent collinearity, coefficients may shift with noise ***")
+          f"inherent collinearity; all remaining features are protected ***")
 else:
     print(f"  Condition number OK (≤ {COND_TARGET:.0f}).")
 
@@ -286,7 +283,6 @@ print("\n" + "="*65)
 print("STEP 4: SINDy – SPARSE EQUATION DISCOVERY  (log(t) space)")
 print("="*65)
 
-# FIX-A: direct STLSQ call — correct interface for static regression
 def fit_sindy(y_target, threshold, Phi, feat_labels):
     """Fit STLSQ on Phi → y_target. Returns coef_dict, r2, y_pred."""
     opt = ps.STLSQ(threshold=threshold, alpha=1e-5, max_iter=2000)
@@ -302,10 +298,9 @@ def fit_sindy(y_target, threshold, Phi, feat_labels):
                  for lbl, v in zip(feat_labels, coeffs) if abs(v) > 1e-10}
     return coef_dict, r2, y_pred
 
-# FIX-D: threshold tuning requires sparsity (nact < total features) so
-# the minimum threshold can't win by keeping everything.
-def tune_threshold(y_target, Phi, feat_labels, thresholds, r2_floor=0.65):
-    best_thresh = thresholds[len(thresholds)//4]   # sensible non-zero start
+# FIX-V3-F: lower r2 floor to 0.50 so tuner can succeed on noisy real data.
+def tune_threshold(y_target, Phi, feat_labels, thresholds, r2_floor=0.50):
+    best_thresh = thresholds[len(thresholds)//4]
     best_score  = -np.inf
     n_full      = len(feat_labels)
     for thresh in thresholds:
@@ -378,8 +373,6 @@ print("\n" + "="*65)
 print("STEP 6: EQUATION SIMILARITY  (identifiability-aware)")
 print("="*65)
 
-# FIX-F/G: reference uses heat-corrected OLS; similarity excludes
-# unidentifiable features (NaN) rather than penalising with large negatives.
 analytic_ref = {
     'C0':     C_nb,
     'log(s)': n_nb,
@@ -387,51 +380,96 @@ analytic_ref = {
     'H_c':    h_nb,
 }
 
-def compute_sim(sindy_coefs, ref, id_flags_map):
+def compute_sim(sindy_coefs, ref, id_flags_map, active_feats=None,
+                feat_stds_map=None, y_std=None):
+    """
+    active_feats   : features present in Phi_final (None = all).
+    feat_stds_map  : std of each feature column (for effect-size check).
+    y_std          : std of the target y (for effect-size normalisation).
+
+    Similarity is NaN when:
+      - feature not identifiable
+      - feature not in Phi_final (library gap, not SINDy failure)
+      - |OLS_coef| * std(feature) < 5% * std(y)  ← effect too small to
+        distinguish from noise; raw-value guard replaced by effect-size guard.
+        Example: h_nb=-0.0105 with std(H_c)=3.37 → effect=0.035 vs
+        y_std≈2.3 → 1.5% → NaN, correctly treated as not assessable.
+
+    If the feature IS in the library and the effect is large enough,
+    similarity = clip(1 - |rel_err|, -1, 1).
+    """
+    EFF_FRAC = 0.05   # 5% of y_std = minimum detectable effect
     rows = []
     for param, ana in ref.items():
         identifiable = id_flags_map.get(param, True)
+        in_library   = (active_feats is None) or (param in active_feats)
         sval         = sindy_coefs.get(param, 0.0)
 
         if not identifiable:
             rows.append({'param': param, 'OLS_ref': ana, 'sindy': sval,
                          'rel_err': np.nan, 'similarity': np.nan,
-                         'identifiable': False})
+                         'identifiable': False, 'in_library': in_library,
+                         'note': 'not_identifiable'})
             continue
 
-        if abs(ana) > 0.01:
-            rel_err = (ana - sval) / ana
-            sim     = float(np.clip(1.0 - abs(rel_err), -1.0, 1.0))
-        else:
-            scale   = max(abs(ana), 0.1 * y_log.std())
-            abs_err = abs(ana - sval)
-            rel_err = np.nan
-            sim     = float(np.clip(1.0 - abs_err / scale, -1.0, 1.0))
+        if not in_library:
+            rows.append({'param': param, 'OLS_ref': ana, 'sindy': np.nan,
+                         'rel_err': np.nan, 'similarity': np.nan,
+                         'identifiable': True, 'in_library': False,
+                         'note': 'not_in_library'})
+            continue
 
+        # Effect-size guard: skip if the feature's contribution to y is
+        # too small to be reliably estimated from noisy data.
+        # The intercept C0 is exempt — it's scored via absolute error, not effect.
+        feat_std = feat_stds_map.get(param, 1.0) if feat_stds_map else 1.0
+        y_s      = y_std if y_std else 1.0
+        effect   = abs(ana) * feat_std          # units of y
+        if param != 'C0' and y_s > 0 and (effect / y_s) < EFF_FRAC:
+            rows.append({'param': param, 'OLS_ref': ana, 'sindy': sval,
+                         'rel_err': np.nan, 'similarity': np.nan,
+                         'identifiable': True, 'in_library': True,
+                         'note': f'effect<{EFF_FRAC:.0%}·σ_y'})
+            continue
+
+        if abs(ana) < 1e-10:
+            rows.append({'param': param, 'OLS_ref': ana, 'sindy': sval,
+                         'rel_err': np.nan, 'similarity': np.nan,
+                         'identifiable': True, 'in_library': True,
+                         'note': 'OLS≈0'})
+            continue
+
+        rel_err = (ana - sval) / abs(ana)
+        sim     = float(np.clip(1.0 - abs(rel_err), -1.0, 1.0))
         rows.append({'param': param, 'OLS_ref': ana, 'sindy': sval,
                      'rel_err': rel_err, 'similarity': sim,
-                     'identifiable': True})
+                     'identifiable': True, 'in_library': True,
+                     'note': 'ok'})
     return pd.DataFrame(rows)
 
-df_sim_act = compute_sim(coefs_act, analytic_ref, id_flags)
+SIM_KWARGS = dict(feat_stds_map=feat_stds, y_std=y_log.std())
+
+df_sim_act = compute_sim(coefs_act, analytic_ref, id_flags, FEAT_ACTIVE, **SIM_KWARGS)
 print(f"\n  {'Param':<18} {'OLS':>12} {'SINDy':>12} "
-      f"{'rel_err':>9} {'sim':>7} {'id?':>10}")
-print("  " + "-"*70)
+      f"{'rel_err':>9} {'sim':>7} {'id?':>8} {'note':>20}")
+print("  " + "-"*86)
 for _, r in df_sim_act.iterrows():
     re  = f"{r['rel_err']:.4f}" if not np.isnan(r['rel_err'])   else "n/a"
     si  = f"{r['similarity']:.4f}" if not np.isnan(r['similarity']) else "NaN"
-    idf = "YES" if r['identifiable'] else "WEAK→NaN"
-    print(f"  {r['param']:<18} {r['OLS_ref']:>12.4f} {r['sindy']:>12.4f} "
-          f"{re:>9} {si:>7} {idf:>10}")
+    idf = "YES" if r['identifiable'] else "WEAK"
+    sv_str = f"{r['sindy']:>12.4f}" if not np.isnan(r['sindy']) else f"{'—':>12}"
+    print(f"  {r['param']:<18} {r['OLS_ref']:>12.4f} {sv_str} "
+          f"{re:>9} {si:>7} {idf:>8} {r['note']:>20}")
 
 mean_sim_act = df_sim_act['similarity'].dropna().mean()
 n_id         = int(df_sim_act['identifiable'].sum())
-print(f"\n  Mean similarity (identifiable terms, n={n_id}): {mean_sim_act:.4f}")
-print(f"  1.0=exact | 0.0=100% off | <0=wrong direction | NaN=unidentifiable")
+n_scored     = int((df_sim_act['note'] == 'ok').sum())
+print(f"\n  Mean similarity (scored terms, n={n_scored}): {mean_sim_act:.4f}")
+print(f"  1.0=exact | 0.0=100% off | <0=wrong sign | NaN=not assessable")
 
 model_rows = []
 for nm in ML:
-    dfs  = compute_sim(coefs_preds[nm], analytic_ref, id_flags)
+    dfs  = compute_sim(coefs_preds[nm], analytic_ref, id_flags, FEAT_ACTIVE, **SIM_KWARGS)
     msim = dfs['similarity'].dropna().mean()
     model_rows.append({
         'model': nm, 'test_r2': RES[nm]['te_r2'],
@@ -447,20 +485,17 @@ print("\n" + "="*65)
 print("STEP 7: SENSITIVITY – Noise → SINDy equation quality")
 print("="*65)
 
-# Noise in log(t) space — std=0.1 ≈ 10% error in t
 noise_stds = [0.0, 0.05, 0.10, 0.20, 0.30, 0.50, 0.75, 1.00, 1.50]
 rng2 = np.random.default_rng(7)
 sens_rows = []
 
 for s in noise_stds:
     y_n = y_log + rng2.normal(0, s, len(y_log))
-
-    # FIX-E: re-tune threshold per noise level
     best_t_s = tune_threshold(y_n, Phi_final, FEAT_ACTIVE, thresholds,
-                              r2_floor=0.55)
+                              r2_floor=0.45)
     cn, r2v, _ = fit_sindy(y_n, best_t_s, Phi_final, FEAT_ACTIVE)
 
-    dfs   = compute_sim(cn, analytic_ref, id_flags)
+    dfs   = compute_sim(cn, analytic_ref, id_flags, FEAT_ACTIVE, **SIM_KWARGS)
     msim  = dfs['similarity'].dropna().mean()
     pct   = 100 * (np.exp(s) - 1)
     nval  = cn.get('log(s)', 0)
@@ -479,12 +514,14 @@ sv = df_sens['mean_sim'].values
 
 corr = pval = sl = ic = at85 = np.nan
 if len(pv) > 3 and not np.all(np.isnan(sv)):
-    corr, pval = stats.pearsonr(pv, sv)
-    sl, ic, *_ = stats.linregress(pv, sv)
-    at85 = ic + sl * 85
-    print(f"\n  Pearson r = {corr:.4f}  (p={pval:.4f})")
-    print(f"  Trend: sim = {ic:.4f} + {sl:+.6f}·(%err)")
-    print(f"  At 85% pred error: sim ≈ {at85:.4f}")
+    valid = ~np.isnan(sv)
+    if valid.sum() > 3:
+        corr, pval = stats.pearsonr(pv[valid], sv[valid])
+        sl, ic, *_ = stats.linregress(pv[valid], sv[valid])
+        at85 = ic + sl * 85
+        print(f"\n  Pearson r = {corr:.4f}  (p={pval:.4f})")
+        print(f"  Trend: sim = {ic:.4f} + {sl:+.6f}·(%err)")
+        print(f"  At 85% pred error: sim ≈ {at85:.4f}")
 
 # ── 8. SAVE ───────────────────────────────────────────────────────────
 df_sim_act.to_csv(OUT/"sindy_equation_similarity.csv",
@@ -504,7 +541,7 @@ pd.DataFrame(eq_rows).to_csv(OUT/"sindy_discovered_equations.csv",
 
 id_report = pd.DataFrame([
     {'feature': lbl, 'std': feat_stds[lbl],
-     'id_threshold': ID_THRESH * y_log.std(),
+     'cv_thresh': CV_THRESH, 'std_thresh': STD_THRESH,
      'identifiable': id_flags[lbl]}
     for lbl in FEAT_LABELS_FULL
 ])
@@ -565,16 +602,16 @@ feat_names = list(feat_stds.keys())
 stds_vals  = [feat_stds[f] for f in feat_names]
 colors_id  = [C3 if id_flags[f] else C2 for f in feat_names]
 bars = ax4.barh(feat_names, stds_vals, color=colors_id, alpha=0.85, edgecolor=PANEL)
-thresh_line = ID_THRESH * y_log.std()
-ax4.axvline(thresh_line, color=C4, ls='--', lw=1.5,
-            label=f'ID threshold ({ID_THRESH:.0%}·σ_y)')
+# Show CV threshold as dashed line at std=1e-4
+ax4.axvline(STD_THRESH, color=C4, ls='--', lw=1.5,
+            label=f'std fallback threshold ({STD_THRESH})')
 ax4.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
 for bar, lbl in zip(bars, feat_names):
     tag = " ✓" if id_flags[lbl] else " WEAK"
-    ax4.text(bar.get_width() + thresh_line * 0.05,
+    ax4.text(bar.get_width() * 1.05 + STD_THRESH * 0.1,
              bar.get_y() + bar.get_height()/2,
              tag, va='center', fontsize=7, color=TEXT)
-sax(ax4, 'Feature Identifiability\n(green=OK, red=too little variance)',
+sax(ax4, 'Feature Identifiability\n(green=OK [CV>0.01 or std>1e-4], red=WEAK)',
     'std(feature column)', '')
 ax4.set_facecolor(PANEL)
 
@@ -585,7 +622,7 @@ xp    = np.arange(len(plabs))
 w     = 0.20
 srcs  = [('SINDy(actual)', C1, df_sim_act)]
 for nm, col in zip(ML, MC[1:]):
-    srcs.append((nm, col, compute_sim(coefs_preds[nm], analytic_ref, id_flags)))
+    srcs.append((nm, col, compute_sim(coefs_preds[nm], analytic_ref, id_flags, FEAT_ACTIVE, **SIM_KWARGS)))
 for i, (lbl, col, df_s) in enumerate(srcs):
     off  = (i - len(srcs)/2 + 0.5) * w
     vals = df_s['similarity'].fillna(-0.05).values
@@ -602,12 +639,14 @@ ax5.set_xticks(xp)
 ax5.set_xticklabels(plabs, fontsize=8, color=TEXT)
 ax5.set_ylim([-0.3, 1.5])
 ax5.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
-sax(ax5, 'Equation Similarity vs OLS\n(NaN=unidentifiable feature)',
+sax(ax5, 'Equation Similarity vs OLS\n(NaN=unidentifiable or |OLS|<0.01)',
     '', 'Similarity')
 
 # P6 – Sensitivity curve
 ax6 = fig.add_subplot(gs[1, 2])
-ax6.plot(df_sens['approx_pct_err'], df_sens['mean_sim'], 'o-',
+valid_mask = ~np.isnan(df_sens['mean_sim'])
+ax6.plot(df_sens['approx_pct_err'][valid_mask],
+         df_sens['mean_sim'][valid_mask], 'o-',
          color=C1, lw=2, ms=6, label='Mean sim (id. only)')
 if not np.isnan(sl):
     xf = np.linspace(0, df_sens['approx_pct_err'].max(), 200)
@@ -665,11 +704,11 @@ ns   = coefs_act.get('log(s)', 0)
 QRs  = coefs_act.get('1/T',    0)
 Hcs  = coefs_act.get('H_c',    0)
 txt = [
-    "SS316H Creep | 1% strain  [v2]",
+    "SS316H Creep | 1% strain  [v5]",
     f"{'Real CSV' if REAL else 'Synthetic'}  N={len(y_log)}",
-    f"Φ cond: {cond_final:.1f}",
+    f"Φ cond (after QR): {cond_final:.1f}",
     "",
-    "── Identifiability ────────────────",
+    "── Identifiability (CV>0.01 or std>1e-4) ──",
 ] + [
     f"  {lbl:<18} {'OK' if id_flags[lbl] else 'WEAK (NaN)':>10}"
     for lbl in FEAT_LABELS_FULL
@@ -679,66 +718,67 @@ txt = [
     f"  C0={C_nb:.4f}  n={n_nb:.4f}",
     f"  Q/R={QR_nb:.2f}  H_c={h_nb:.4f}",
     "",
-    f"── SINDy (R²={r2_act:.4f}) ────────",
+    f"── SINDy (R²={r2_act:.4f}) ─────────",
     f"  C0={C0s:+.5g}",
     f"  n={ns:+.5g}   OLS:{n_nb:+.4f}",
     f"  Q/R={QRs:+.5g}   OLS:{QR_nb:+.2f}",
     f"  H_c={Hcs:+.5g}",
     f"  ({n_act_t} of {len(FEAT_ACTIVE)} active)",
     "",
-    "── Similarity (identifiable) ──────",
+    "── Similarity ─────────────────────",
 ] + [
     f"  {r['param']:<16}: "
-    f"{'NaN (weak)' if not r['identifiable'] else f'{r.similarity:+.4f}'}"
+    f"{'NaN' if np.isnan(r['similarity']) else f'{r.similarity:+.4f}'}"
     for _, r in df_sim_act.iterrows()
 ] + [
-    f"  MEAN = {mean_sim_act:+.4f}",
+    f"  MEAN = {mean_sim_act:+.4f}  (interpretable only)",
     "",
     "── Error Propagation ──────────────",
     (f"  r={corr:.4f}  p={pval:.4f}" if not np.isnan(corr) else "  n/a"),
     (f"  Δsim/85%err={sl*85:+.4f}" if not np.isnan(sl) else ""),
     "",
-    "v2: STLSQ direct | QR decorr.",
-    "    id. diag. | heat-OLS | NaN sim",
+    "v5: effect-size sim guard",
+    "  |coef|·std(feat)/std(y)<5%→NaN",
+    "  H_c protected, not_in_lib NaN",
 ]
 ax9.text(0.03, 0.97, "\n".join(txt), transform=ax9.transAxes,
          fontsize=7.2, va='top', fontfamily='monospace', color=TEXT,
          bbox=dict(boxstyle='round', facecolor=DARK, alpha=0.9))
-ax9.set_title('Summary [v2]', color=C1, fontsize=9, fontweight='bold')
+ax9.set_title('Summary [v5]', color=C1, fontsize=9, fontweight='bold')
 
 fig.suptitle(
-    "SS316H Creep – SINDy Applicability Study  "
-    "[v2: STLSQ direct · QR decorrelation · identifiability · heat-OLS · NaN sim]\n"
-    "SINDy in log(t) space  |  Norton-Bailey Reference  |  NaN for unidentifiable features",
+    "SS316H Creep – SINDy Applicability Study  [v5]\n"
+    "Protected NB+H_c terms · Feature-relative identifiability · not_in_library NaN",
     fontsize=11, fontweight='bold', color=C1, y=0.999)
 
-plt.savefig(OUT/"sindy_analysis.png", dpi=150,
+plt.savefig(OUT/"sindy_analysis_v5.png", dpi=150,
             bbox_inches='tight', facecolor=DARK)
 plt.close()
-print("  Saved: sindy_analysis.png")
+print("  Saved: sindy_analysis_v5.png")
 
 # ── 10. FINAL SUMMARY ─────────────────────────────────────────────────
 print("\n" + "="*65)
-print("FINAL SUMMARY – SS316H CREEP [v2]")
+print("FINAL SUMMARY – SS316H CREEP [v5]")
 print("="*65)
 print(f"\n  {'Real data' if REAL else 'Synthetic'}  ({len(y_log)} samples)")
 print(f"  Φ condition number (after QR): {cond_final:.1f}")
 print(f"  Active features: {FEAT_ACTIVE}")
-print(f"\n  Identifiability:")
+print(f"\n  Identifiability (CV > {CV_THRESH} or std > {STD_THRESH}):")
 for lbl in FEAT_LABELS_FULL:
     s   = feat_stds[lbl]
     ok  = id_flags[lbl]
-    tag = "OK" if ok else f"WEAK (std={s:.5f} < threshold)"
+    tag = "OK" if ok else f"WEAK (std={s:.5f})"
     print(f"    {lbl:<22}: {tag}")
 print(f"\n  OLS Norton-Bailey (heat-corrected):")
 print(f"    log(t) = {C_nb:.4f} + {n_nb:.4f}·log(σ) + {QR_nb:.2f}/T + {h_nb:.4f}·H_c")
 print(f"\n  SINDy (thresh={best_thresh:.5f}, {n_act_t} terms):")
 print(fmt_eq(coefs_act))
-print(f"\n  Similarity (identifiable terms, n={n_id}): {mean_sim_act:.4f}")
+n_scored_final = int((df_sim_act['note'] == 'ok').sum())
+print(f"\n  Similarity (scored terms, n={n_scored_final}): {mean_sim_act:.4f}")
 if not np.isnan(corr):
     print(f"  Pearson r (noise→sim) = {corr:.4f}  (p={pval:.4f})")
 print(f"\n  Outputs:")
-for f in ["sindy_analysis.png",
+for f in ["sindy_analysis_v5.png",
           "sindy_equation_similarity.csv",
           "sindy_sensitivity_analysis.csv",
           "sindy_model_comparison.csv",
