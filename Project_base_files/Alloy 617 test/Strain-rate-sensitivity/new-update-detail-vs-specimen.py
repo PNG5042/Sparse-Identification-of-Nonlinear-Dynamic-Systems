@@ -178,28 +178,3 @@ for (T, rate), g in merged.groupby([TEMP_COL, RATE_COL]):
 # =========================================================
 params = pd.DataFrame(param_rows)
 params.to_csv("sindy_parameters_temperature.csv", index=False)
-
-metrics = pd.DataFrame(metric_rows)
-
-if not metrics.empty:
-    metrics.to_csv("sindy_metrics_temperature.csv", index=False)
-    print("\nSaved metric results")
-
-else:
-    print("\nNo metric results (fill ANALYTICAL_COEFS)")
-
-
-# =========================================================
-# PLOT METRIC VS TEMPERATURE
-# =========================================================
-if not metrics.empty:
-
-    sub = metrics[metrics["feature"] == FEATURE_TO_PLOT]
-
-    plt.figure(figsize=(7,5))
-    plt.scatter(sub["Temperature"], sub["metric"])
-    plt.xlabel("Temperature (C)")
-    plt.ylabel("Metric = 1 - relative error")
-    plt.title("Metric vs Temperature")
-    plt.grid(True)
-    plt.show()
