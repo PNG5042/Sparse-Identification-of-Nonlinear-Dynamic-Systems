@@ -335,7 +335,7 @@ for nm in ML:
     coefs_preds[nm] = cd
     r2_preds[nm]    = r2v
     yp_sindy_ml[nm] = yhat
-    print(f"  SINDy ({nm}): R²={r2v:.4f}  "
+    print(f"  SINDy ({nm}): R²={r2v:.4f}  "clc
           f"{len(cd)} active: {list(cd.keys())}")
 
 # ── 5. EQUATIONS ──────────────────────────────────────────────────────
