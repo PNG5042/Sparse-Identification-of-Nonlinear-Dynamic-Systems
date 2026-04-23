@@ -8,3 +8,15 @@ All rights reserved.
 The license for this project is pending review and confirmation by INL. 
 
 Until confirmed, this code is provided for internal educational and research use only and may not be redistributed or used for commercial purposes without written permission from INL.
+
+# Sparse-Identification-of-Nonlinear-Dynamic-Systems
+This project applies Sparse Identification of Nonlinear Dynamics (SINDy) to evaluate its effectiveness on 316H stainless steel and alloy 617 material data. The objective is to develop and validate a workflow that can identify, process, and compare dynamic material behaviors using SINDy.
+
+Team Roster & Contacts
+
+Prathmesh Nitin Gite: gitep@oregonstate.edu
+Phuc Minh Chau: tranchau@oregonstate.edu
+Philip Nguyen: nguyphi4@oregonstate.edu
+
+Mentor: Ramon Ken Yoshiura (INL)
+ramon.yoshiura@inl.gov

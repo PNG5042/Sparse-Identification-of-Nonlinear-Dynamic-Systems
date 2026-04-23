@@ -1,25 +1,22 @@
 # ================================
-# ALLOY 617 TENSILE – SINDy APPLICABILITY STUDY  (PySINDy edition) -- v4
+# ALLOY 617 TENSILE – SINDy APPLICABILITY STUDY  (PySINDy edition) -- v6
 # ================================
-# CHANGES vs v3:
-#   FIX-A  QR drop logic used pivot indices as column positions — now uses
-#          separate positional keep_idx and piv_order lists so the column
-#          slice Phi_id[:, keep_idx] always refers to correct positions.
-#   FIX-B  Removed dead variable Phi_qr (assigned before loop, never updated
-#          inside it, shadowed by Phi_final after loop).
-#   FIX-C  fit_sindy_log replaced SINDy model hack (passing design matrix as
-#          state variable) with a direct ps.STLSQ call. The old approach worked
-#          by accident (t=1, no differentiation) but would silently break on
-#          PySINDy version changes. STLSQ is the correct interface for static
-#          regression.
-#   FIX-D  compute_sim near-zero fallback now uses a data-driven scale
-#          (max(|ana|, 0.1*std(log_y))) instead of the magic constant 0.1.
-#   FIX-E  Sensitivity loop re-tunes threshold at each noise level instead of
-#          reusing the clean-data threshold, preventing spurious active terms
-#          at high noise from distorting the sensitivity curve.
-#   FIX-F  Single-specimen heats (len < 3) skipped in IQR outlier detection;
-#          IQR=0 previously made them immune to outlier flagging.
-#   FIX-G  Removed chr()-obfuscated string construction for 'log(sr)' key.
+# CHANGES vs v5:
+#   FIX-H  Instantaneous SR spike rejection at three levels:
+#            TIGHT  : keep sr_inst within 10×  of specimen median
+#            MOD    : keep sr_inst within 100× of specimen median
+#            PCT    : keep sr_inst in global [1st, 99th] percentile
+#          All three run through the full point-wise pipeline and results
+#          are compared on a dedicated figure page.
+#   FIX-I  QR drop reporting upgraded: every run now prints which term was
+#          dropped and why (condition contribution), and a cross-filter
+#          summary table shows which features survive all three levels.
+#   FIX-J  Point-wise SR span now reported per filter level so the user can
+#          see how much rate dynamic range survives each cut.
+#   FIX-K  Sensitivity analysis runs per filter level (not just level 0).
+#   FIX-L  UTS pipeline unchanged from v5 (28 specimens, all RT forms).
+#   NOTE   QR is intentionally left free to prune any column; we report
+#          what gets dropped and flag physically unexpected outcomes.
 # ================================
 
 import numpy as np
@@ -51,9 +48,35 @@ CSV_FILES = [
     "SGIHX_A1_DETAIL_DATA_Hspec.csv",
 ]
 
-# ── 0. LOAD & REDUCE ──────────────────────────────────────────────────
+N_PTS_PER_SPEC = 50   # target points per specimen before SR filtering
+
+# SR filter definitions: (label, method, factor_or_pct)
+SR_FILTERS = [
+    ('TIGHT',  'factor',  10.0),
+    ('MOD',    'factor', 100.0),
+    ('PCT',    'pct',   (1.0, 99.0)),
+]
+
+# ── colour scheme ──────────────────────────────────────────────────────
+DARK ='#0d1117'; PANEL='#161b22'; GRID='#21262d'
+C1='#58a6ff'; C2='#f85149'; C3='#3fb950'; C4='#d29922'; C5='#bc8cff'; TEXT='#c9d1d9'
+MC = [C1, C3, C4]; HC = [C1, C3, C4, C5]
+FILTER_COLORS = {'TIGHT': C1, 'MOD': C3, 'PCT': C4}
+
+def sax(ax, title, xl='', yl=''):
+    ax.set_facecolor(PANEL)
+    for sp in ax.spines.values(): sp.set_edgecolor(GRID)
+    ax.tick_params(colors=TEXT, labelsize=8)
+    ax.set_title(title, color=C1, fontsize=9, fontweight='bold', pad=6)
+    if xl: ax.set_xlabel(xl, color=TEXT, fontsize=8)
+    if yl: ax.set_ylabel(yl, color=TEXT, fontsize=8)
+    ax.grid(True, color=GRID, alpha=0.55, lw=0.5)
+
+# ══════════════════════════════════════════════════════════════════════
+# 0. LOAD RAW DATA
+# ══════════════════════════════════════════════════════════════════════
 print("="*65)
-print("ALLOY 617 TENSILE – SINDy UTS STUDY  (PySINDy) [v4]")
+print("ALLOY 617 – SINDy v6  (SR filtering × 3 + honest QR)")
 print("="*65)
 
 frames = []
@@ -79,817 +102,963 @@ if REAL:
     df_raw["Heat_enc"] = df_raw["Heat"].map(heat_enc)
     df_raw["Form_enc"] = df_raw["Material_Form"].map(form_enc)
 
-    records = []
+    # ── per-specimen extraction ────────────────────────────────────────
+    specimen_records = []
+    pointwise_raw    = []   # all points before SR filter, with spec median sr
+
     for spec, grp in df_raw.groupby("Specimen_Name"):
         grp = grp.sort_values("Count").dropna(
             subset=["Stress_MPa", "Strain", "Elapsed_Time_Sec"])
         if len(grp) < 3:
             continue
+
+        # specimen-level quantities
         idx_uts     = grp["Stress_MPa"].idxmax()
         uts         = float(grp.loc[idx_uts, "Stress_MPa"])
         eps_uts_val = float(grp.loc[idx_uts, "Strain"])
-        dt   = grp["Elapsed_Time_Sec"].diff().clip(lower=1e-9)
-        deps = grp["Strain"].diff()
-        sr_s = (deps / dt).dropna()
-        sr_s = sr_s[sr_s > 0]
+        dt_s   = grp["Elapsed_Time_Sec"].diff().clip(lower=1e-9)
+        deps_s = grp["Strain"].diff()
+        sr_s   = (deps_s / dt_s).dropna()
+        sr_s   = sr_s[sr_s > 0]
         if len(sr_s) == 0:
             continue
-        sr = float(sr_s.median())
-        records.append({
+        sr_specimen = float(sr_s.median())
+
+        h_enc = float(grp["Heat_enc"].iloc[0])
+        f_enc = float(grp["Form_enc"].iloc[0])
+
+        specimen_records.append({
             "Specimen_Name": spec,
             "UTS":           uts,
             "eps_at_UTS":    eps_uts_val,
-            "strain_rate":   sr,
-            "Heat_enc":      float(grp["Heat_enc"].iloc[0]),
-            "Form_enc":      float(grp["Form_enc"].iloc[0]),
+            "strain_rate":   sr_specimen,
+            "Heat_enc":      h_enc,
+            "Form_enc":      f_enc,
             "Heat":          grp["Heat"].iloc[0],
             "Material_Form": grp["Material_Form"].iloc[0],
         })
 
-    summary = pd.DataFrame(records).dropna()
-    summary = summary[
-        (summary["UTS"]         > 0) &
-        (summary["eps_at_UTS"]  > 1e-6) &
+        # point-wise loading curve (up to UTS)
+        stress  = grp["Stress_MPa"].values
+        strain  = grp["Strain"].values
+        elapsed = grp["Elapsed_Time_Sec"].values
+        uts_idx = int(np.argmax(stress))
+        if uts_idx < 2:
+            continue
+
+        stress_l  = stress[1:uts_idx+1]
+        strain_l  = strain[1:uts_idx+1]
+        elapsed_l = elapsed[1:uts_idx+1]
+
+        dt_arr   = np.diff(elapsed_l, prepend=elapsed_l[0])
+        deps_arr = np.diff(strain_l,  prepend=strain_l[0])
+        dt_arr[dt_arr < 1e-9] = 1e-9
+        sr_inst  = deps_arr / dt_arr
+
+        valid = (stress_l > 1.0) & (strain_l > 1e-4) & (sr_inst > 0)
+        if valid.sum() < 3:
+            continue
+        sv = stress_l[valid]; ev = strain_l[valid]; sv_r = sr_inst[valid]
+
+        n_v = len(sv)
+        idx_sel = (np.arange(n_v) if n_v <= N_PTS_PER_SPEC
+                   else np.round(np.linspace(0, n_v-1, N_PTS_PER_SPEC)).astype(int))
+
+        for i in idx_sel:
+            pointwise_raw.append({
+                "Specimen_Name": spec,
+                "Stress_MPa":   sv[i],
+                "Strain":       ev[i],
+                "sr_inst":      sv_r[i],
+                "sr_median":    sr_specimen,   # specimen median — used for filtering
+                "Heat_enc":     h_enc,
+                "Form_enc":     f_enc,
+                "Heat":         grp["Heat"].iloc[0],
+                "Material_Form": grp["Material_Form"].iloc[0],
+            })
+
+    summary   = pd.DataFrame(specimen_records).dropna()
+    summary   = summary[
+        (summary["UTS"] > 0) &
+        (summary["eps_at_UTS"] > 1e-6) &
         (summary["strain_rate"] > 0)
     ].copy()
+    df_pw_all = pd.DataFrame(pointwise_raw)
 
     # RT / HT separation
     ht_mask_primary = (
-        ((summary["UTS"] < 500) & (summary["eps_at_UTS"] < 0.05))   # original
-        | (summary["UTS"] < 350)                                      # hard UTS floor
+        ((summary["UTS"] < 500) & (summary["eps_at_UTS"] < 0.05))
+        | (summary["UTS"] < 350)
         | ((summary["UTS"] < 550) & (summary["Material_Form"] == "Plate")
-        & (summary["eps_at_UTS"] < 0.20))                         # plate-specific
+           & (summary["eps_at_UTS"] < 0.20))
     )
     iqr_outlier = pd.Series(False, index=summary.index)
     for heat, grp in summary.groupby("Heat"):
-        # FIX-F: skip heats with fewer than 3 specimens — IQR=0 makes all
-        # single/dual-specimen heats immune to outlier detection otherwise.
         if len(grp) < 3:
             continue
         luts = np.log(grp["UTS"])
         q1, q3 = luts.quantile(0.25), luts.quantile(0.75)
         iqr = q3 - q1
-        lo, hi = q1 - 2.0 * iqr, q3 + 2.0 * iqr
+        lo, hi = q1 - 2.0*iqr, q3 + 2.0*iqr
         iqr_outlier.loc[grp.index] = (luts < lo) | (luts > hi)
 
     ht_mask = ht_mask_primary | iqr_outlier
     df_ht   = summary[ht_mask].copy()
     df_rt   = summary[~ht_mask].copy()
+    rt_specs = set(df_rt["Specimen_Name"])
 
-    # ── FORM-SPLIT ANALYSIS ──────────────────────────────────────────
-    df_bar   = df_rt[df_rt["Material_Form"] == "Bar"].copy()
-    df_plate = df_rt[df_rt["Material_Form"] == "Plate"].copy()
-    print(f"\n  Form split — Bar: {len(df_bar)}  |  Plate: {len(df_plate)}")
+    print(f"\n  Specimens parsed  : {len(summary)}")
+    print(f"  HT/outlier        : {len(df_ht)}")
+    print(f"  RT retained       : {len(df_rt)}  "
+          f"(Bar={( df_rt['Material_Form']=='Bar').sum()}, "
+          f"Plate={(df_rt['Material_Form']=='Plate').sum()})")
+    print(f"  PW records (pre-filter): {len(df_pw_all)}")
 
-    # Use Bar-only for SINDy (clean single-heat dataset)
-    df_rt = df_bar.copy()
-    print(f"  → Using Bar specimens only for SINDy analysis")
-    # ─────────────────────────────────────────────────────────────────
+    # keep only RT specimens in point-wise pool
+    df_pw_rt = df_pw_all[df_pw_all["Specimen_Name"].isin(rt_specs)].copy()
+    print(f"  PW records (RT only)   : {len(df_pw_rt)}")
 
-    print(f"\n  Total valid specimens  : {len(summary)}")
-    print(f"  HT / outlier excluded  : {len(df_ht)} "
-          f"→ {df_ht['Specimen_Name'].tolist()}")
-    print(f"  RT retained            : {len(df_rt)}")
-    print(f"  RT UTS  : {df_rt['UTS'].min():.1f} – {df_rt['UTS'].max():.1f} MPa")
-    print(f"  RT eps  : {df_rt['eps_at_UTS'].min():.4f} – "
-          f"{df_rt['eps_at_UTS'].max():.4f}")
-    print(f"  RT sr   : {df_rt['strain_rate'].min():.2e} – "
-          f"{df_rt['strain_rate'].max():.2e} 1/s")
+    # ── Apply SR filters ───────────────────────────────────────────────
+    # PCT bounds computed once on the RT pool
+    pct_lo = np.percentile(df_pw_rt["sr_inst"], 1.0)
+    pct_hi = np.percentile(df_pw_rt["sr_inst"], 99.0)
+    print(f"\n  SR global 1–99 pct: [{pct_lo:.3e}, {pct_hi:.3e}] 1/s")
 
+    df_pw_filtered = {}
+    for flabel, fmethod, fparam in SR_FILTERS:
+        if fmethod == 'factor':
+            mask = ((df_pw_rt["sr_inst"] >= df_pw_rt["sr_median"] / fparam) &
+                    (df_pw_rt["sr_inst"] <= df_pw_rt["sr_median"] * fparam))
+        else:  # pct
+            lo_p, hi_p = fparam
+            mask = ((df_pw_rt["sr_inst"] >= pct_lo) &
+                    (df_pw_rt["sr_inst"] <= pct_hi))
+        df_f = df_pw_rt[mask].copy()
+        df_pw_filtered[flabel] = df_f
+        sr_span = (np.log10(df_f["sr_inst"].max()) -
+                   np.log10(df_f["sr_inst"].min())) if len(df_f) > 1 else 0
+        print(f"  Filter {flabel:<6}: {len(df_f):>5} pts  |  "
+              f"sr=[{df_f['sr_inst'].min():.2e}, {df_f['sr_inst'].max():.2e}]  |  "
+              f"span={sr_span:.2f} dec")
+
+    # UTS arrays
     UTS         = df_rt["UTS"].values.astype(float)
     eps_at_UTS  = df_rt["eps_at_UTS"].values.astype(float)
     strain_rate = df_rt["strain_rate"].values.astype(float)
-    Heat_enc    = df_rt["Heat_enc"].values.astype(float)
-    Form_enc    = df_rt["Form_enc"].values.astype(float)
+    Heat_enc_u  = df_rt["Heat_enc"].values.astype(float)
+    Form_enc_u  = df_rt["Form_enc"].values.astype(float)
 
 else:
-    print("\n  CSVs not found – synthetic Alloy 617 RT data")
-    n   = 120
+    # synthetic fallback
+    print("\n  CSVs not found – synthetic data")
+    n_spec = 28
     rng = np.random.default_rng(42)
-    Heat_enc    = rng.integers(0, 3, n).astype(float)
-    Form_enc    = np.zeros(n)
-    strain_rate = 10 ** rng.uniform(-4.5, -3.5, n)
-    eps_at_UTS  = rng.uniform(0.20, 0.55, n)
-    K_true, m_true, p_true = 727.0, -0.016, 0.43
-    h_offset = np.array([0.0, +25.0, -15.0])[Heat_enc.astype(int)]
-    UTS = (K_true * (strain_rate**m_true) * (eps_at_UTS**p_true)
-           + h_offset + np.random.default_rng(0).normal(0, 12, n))
+    Heat_enc_u  = rng.integers(0, 3, n_spec).astype(float)
+    Form_enc_u  = rng.integers(0, 2, n_spec).astype(float)
+    strain_rate = 10 ** rng.uniform(-4.5, -3.5, n_spec)
+    eps_at_UTS  = rng.uniform(0.20, 0.55, n_spec)
+    UTS = (727. * strain_rate**-0.016 * eps_at_UTS**0.43
+           + np.array([0.,25.,-15.])[Heat_enc_u.astype(int)]
+           + rng.normal(0, 12, n_spec))
     df_rt = df_ht = summary = None
 
-# Centred heat encoding
-H_mean = Heat_enc.mean()
-H_c    = Heat_enc - H_mean
+    n_pw = 1400
+    PW_strain_syn = rng.uniform(0.01, 0.60, n_pw)
+    PW_sr_syn     = 10 ** rng.uniform(-4.5, -3.5, n_pw)
+    PW_He_syn     = rng.integers(0, 3, n_pw).astype(float)
+    PW_Fe_syn     = rng.integers(0, 2, n_pw).astype(float)
+    PW_stress_syn = np.clip(900.*PW_sr_syn**-0.016 * PW_strain_syn**0.43
+                            + rng.normal(0,15,n_pw), 1., None)
+    syn_df = pd.DataFrame({'Specimen_Name':'SYN','Stress_MPa':PW_stress_syn,
+                           'Strain':PW_strain_syn,'sr_inst':PW_sr_syn,
+                           'sr_median':1e-4,'Heat_enc':PW_He_syn,
+                           'Form_enc':PW_Fe_syn,'Heat':0,'Material_Form':'Bar'})
+    df_pw_filtered = {fl: syn_df.copy() for fl, *_ in SR_FILTERS}
+    rt_specs = set(); df_pw_rt = syn_df; pct_lo = PW_sr_syn.min(); pct_hi = PW_sr_syn.max()
 
-log_y   = np.log(UTS)
-log_sr  = np.log(np.clip(strain_rate, 1e-12, None))
-log_eps = np.log(np.clip(eps_at_UTS,  1e-12, None))
-sr_dec  = np.log10(strain_rate.max()) - np.log10(strain_rate.min())
+H_mean_u = Heat_enc_u.mean(); H_c_u = Heat_enc_u - H_mean_u
+log_y_uts = np.log(UTS)
+log_sr_u  = np.log(np.clip(strain_rate, 1e-12, None))
+log_eps_u = np.log(np.clip(eps_at_UTS,  1e-12, None))
+sr_dec_u  = np.log10(strain_rate.max()) - np.log10(strain_rate.min())
 
-print(f"\n  H_c range: [{H_c.min():.2f}, {H_c.max():.2f}]  "
-      f"| SR span: {sr_dec:.2f} decades")
-print(f"N = {len(UTS)},  UTS: {UTS.min():.1f} – {UTS.max():.1f} MPa  "
-      f"(mean={UTS.mean():.1f})")
+# ══════════════════════════════════════════════════════════════════════
+# SHARED HELPERS
+# ══════════════════════════════════════════════════════════════════════
 
-# ── 1. ML MODEL ───────────────────────────────────────────────────────
-print("\n" + "="*65)
-print("STEP 1: ML PREDICTION MODEL  (target = UTS, MPa)")
-print("="*65)
-
-def ml_feats(Hc, F, eps, sr, l_eps, l_sr):
-    return np.column_stack([
-        np.ones_like(Hc), Hc, Hc**2, F,
-        eps, eps**2, np.sqrt(np.clip(eps, 0, None)), l_eps,
-        sr, l_sr, eps*l_sr, l_eps*l_sr, Hc*l_eps, Hc*l_sr,
-    ])
-
-X_all  = ml_feats(H_c, Form_enc, eps_at_UTS, strain_rate, log_eps, log_sr)
-n_feat = min(10, X_all.shape[1])
-sel    = SelectKBest(f_regression, k=n_feat)
-X_sel  = sel.fit_transform(X_all, UTS)
-sc_ml  = StandardScaler()
-X_sc   = sc_ml.fit_transform(X_sel)
-
-n_samp = len(UTS)
-if n_samp >= 20:
-    bins = np.digitize(UTS, np.percentile(UTS, [20, 40, 60, 80]))
-    sss  = StratifiedShuffleSplit(1, test_size=0.25, random_state=42)
-    tr_i, te_i = next(sss.split(X_sc, bins))
-else:
-    split = max(1, int(n_samp * 0.75))
-    tr_i, te_i = np.arange(split), np.arange(split, n_samp)
-
-Xtr, Xte = X_sc[tr_i], X_sc[te_i]
-ytr, yte  = UTS[tr_i],  UTS[te_i]
-
-n_cv = min(5, max(2, len(tr_i) // 5))
-rcv  = GridSearchCV(Ridge(), {'alpha': [0.1, 1, 10, 50, 100, 500]},
-                    cv=n_cv, scoring='r2')
-rcv.fit(Xtr, ytr)
-ridge = rcv.best_estimator_
-
-rf = RandomForestRegressor(300, max_depth=6,
-                            min_samples_split=max(4, len(tr_i)//15),
-                            min_samples_leaf=max(2, len(tr_i)//25),
-                            max_features='sqrt', random_state=42)
-rf.fit(Xtr, ytr)
-ens = VotingRegressor([('r1', ridge),
-                        ('r2', Ridge(alpha=rcv.best_params_['alpha'])),
-                        ('rf', rf)])
-ens.fit(Xtr, ytr)
-
-ML  = {'Ridge': ridge, 'RandomForest': rf, 'Ensemble': ens}
-RES = {}
-for nm, m in ML.items():
-    yp  = m.predict(Xte)
-    err = np.abs((yp - yte) / np.clip(np.abs(yte), 1, None)) * 100
-    RES[nm] = dict(tr_r2=m.score(Xtr, ytr), te_r2=m.score(Xte, yte),
-                   med_err=np.median(err), err=err, ypall=m.predict(X_sc))
-    print(f"  {nm:<14} TrainR²={RES[nm]['tr_r2']:.4f}  "
-          f"TestR²={RES[nm]['te_r2']:.4f}  "
-          f"MedianErr={RES[nm]['med_err']:.1f}%")
-
-best_ml = max(RES, key=lambda k: RES[k]['te_r2'])
-print(f"\n  Best: {best_ml}  (R²={RES[best_ml]['te_r2']:.4f}, "
-      f"err={RES[best_ml]['med_err']:.1f}%)")
-
-# OLS R-O reference
-A_ro     = np.column_stack([np.ones_like(log_sr), log_sr, log_eps])
-ro_c, *_ = np.linalg.lstsq(A_ro, log_y, rcond=None)
-logK_ro, m_ro, p_ro = ro_c
-K_ro = np.exp(logK_ro)
-print(f"  OLS R-O (RT, log-space)  *** K unreliable: SR span only {sr_dec:.2f} decades ***")
-print(f"    log(UTS) = {logK_ro:.5f} + {m_ro:.5f}·log(sr) + {p_ro:.5f}·log(eps)")
-print(f"    UTS = {K_ro:.2f} · sr^{m_ro:.5f} · eps^{p_ro:.5f}")
-
-# ── 2. IDENTIFIABILITY DIAGNOSTIC ─────────────────────────────────────
-print("\n" + "="*65)
-print("STEP 2: FEATURE IDENTIFIABILITY DIAGNOSTIC")
-print("="*65)
-
-FEAT_LABELS_FULL = ['C0', 'log(sr)', 'log(eps)', 'log(eps)^2',
-                    'H_c', 'H_c*log(eps)']
-
-def build_phi_full(Hc, eps, sr):
-    l_sr  = np.log(np.clip(sr,  1e-12, None))
-    l_eps = np.log(np.clip(eps, 1e-12, None))
-    return np.column_stack([
-        np.ones(len(Hc)),
-        l_sr,
-        l_eps,
-        l_eps**2,
-        Hc,
-        Hc * l_eps,
-    ])
-
-Phi_full = build_phi_full(H_c, eps_at_UTS, strain_rate)
-
-ID_THRESH = 0.10
-
-print(f"\n  Target log(UTS) std = {log_y.std():.5f}")
-print(f"  Identifiability threshold: feature std < {ID_THRESH:.0%} of target std "
-      f"= {ID_THRESH * log_y.std():.5f}\n")
-print(f"  {'Feature':<22} {'std(col)':>10} {'CV':>8} {'identifiable?':>15}")
-print("  " + "-"*57)
-
-id_flags   = {}
-feat_stds  = {}
-
-for i, lbl in enumerate(FEAT_LABELS_FULL):
-    col = Phi_full[:, i]
-    s   = col.std()
-    feat_stds[lbl] = s
-    if lbl == 'C0':
-        id_flags[lbl] = True
-        print(f"  {'C0':<22} {'(intercept)':>10} {'—':>8} {'YES (fixed)':>15}")
-        continue
-    cv  = s / abs(col.mean()) if abs(col.mean()) > 1e-10 else np.nan
-    ok  = s >= ID_THRESH * log_y.std()
-    id_flags[lbl] = ok
-    cv_str = f"{cv:.3f}" if not np.isnan(cv) else "n/a"
-    flag   = "YES" if ok else "*** WEAK ***"
-    print(f"  {lbl:<22} {s:>10.5f} {cv_str:>8} {flag:>15}")
-
-weak_feats = [k for k, v in id_flags.items() if not v]
-print(f"\n  Weakly identifiable features: "
-      f"{weak_feats if weak_feats else 'none'}")
-if 'log(sr)' in weak_feats:
-    print(f"  → log(sr) std = {feat_stds['log(sr)']:.5f}  "
-          f"(SR span only {sr_dec:.2f} decades).")
-    print(f"    SINDy cannot distinguish a rate effect from noise at this scale.")
-    print(f"    The OLS m = {m_ro:.5f} is also unreliable from this data.")
-
-# ── 3. QR DECORRELATION ───────────────────────────────────────────────
-print("\n" + "="*65)
-print("STEP 3: QR DECORRELATION  (select well-conditioned column subset)")
-print("="*65)
-
-id_cols   = [i for i, lbl in enumerate(FEAT_LABELS_FULL) if id_flags[lbl]]
-id_labels = [FEAT_LABELS_FULL[i] for i in id_cols]
-Phi_id    = Phi_full[:, id_cols]
-
-col_norms  = np.linalg.norm(Phi_id, axis=0, keepdims=True)
-col_norms[col_norms == 0] = 1.0
-Phi_normed = Phi_id / col_norms
-
-_, _, piv = scipy_qr(Phi_normed, pivoting=True)
-
-print("\n  QR pivot order (most → least important):")
-print([id_labels[i] for i in piv])
-
-COND_TARGET = 50.0
-cond_prev   = np.linalg.cond(Phi_id)
-
-# FIX-A: keep positional indices separate from QR priority order.
-# piv_order gives the drop priority (last = drop first).
-# keep_idx tracks which positional columns remain in Phi_id.
-keep_idx  = list(range(len(id_labels)))   # positional indices into Phi_id
-piv_order = list(piv)                     # QR priority — separate from keep_idx
-# FIX-B: Phi_qr removed — it was assigned once before the loop and never
-# updated inside it, making it dead code. Phi_final is the correct output.
-dropped_labels = []
-
-while len(keep_idx) > 2:
-    cond_now = np.linalg.cond(Phi_id[:, keep_idx])
-    if cond_now <= COND_TARGET:
-        break
-    # Drop the lowest-priority column still in keep_idx
-    # piv_order[-1] is the least important; walk back until we find one still kept
-    for candidate in reversed(piv_order):
-        if candidate in keep_idx:
-            keep_idx.remove(candidate)
-            piv_order.remove(candidate)
-            dropped_labels.append(id_labels[candidate])
-            break
-
-Phi_final   = Phi_id[:, keep_idx]
-FEAT_ACTIVE = [id_labels[i] for i in keep_idx]
-cond_final  = np.linalg.cond(Phi_final)
-
-print(f"\n  Before QR pruning : {len(id_labels)} cols, cond = {cond_prev:.1f}")
-print(f"  After  QR pruning : {len(FEAT_ACTIVE)} cols, cond = {cond_final:.1f}")
-print(f"  Kept   : {FEAT_ACTIVE}")
-print(f"  Dropped: {dropped_labels if dropped_labels else 'none'}")
-if cond_final > COND_TARGET:
-    print(f"  *** NOTE: cond still {cond_final:.1f} — "
-          f"inherent data collinearity, results may still shift with noise ***")
-else:
-    print(f"  Condition number OK (≤ {COND_TARGET:.0f}).")
-
-# ── 4. SINDy ──────────────────────────────────────────────────────────
-print("\n" + "="*65)
-print("STEP 4: SINDy – SPARSE EQUATION DISCOVERY  (log(UTS) space)")
-print("="*65)
-
-# FIX-C: replaced the ps.SINDy hack (passing design matrix as state variable,
-# using model.predict() for fitted values) with a direct ps.STLSQ call.
-# The old approach worked by accident when t=1 and no differentiation occurred,
-# but is not the intended API and would silently break on version changes.
 def fit_sindy_log(y_log, threshold, Phi, feat_labels):
-    """Fit STLSQ on Phi → y_log. Returns coef_dict, r2_log, r2_uts, log_pred."""
     opt = ps.STLSQ(threshold=threshold, alpha=1e-5, max_iter=2000)
     opt.fit(Phi, y_log)
     coeffs   = opt.coef_.ravel()
     log_pred = Phi @ coeffs
+    ss_r = np.sum((y_log - log_pred)**2)
+    ss_t = np.sum((y_log - y_log.mean())**2)
+    r2_log = 1 - ss_r/ss_t if ss_t else 0.0
+    y_pred = np.exp(log_pred); y_true = np.exp(y_log)
+    ss_ru = np.sum((y_true - y_pred)**2)
+    ss_tu = np.sum((y_true - y_true.mean())**2)
+    r2_lin = 1 - ss_ru/ss_tu if ss_tu else 0.0
+    coef_dict = {lbl: float(v) for lbl, v in zip(feat_labels, coeffs)
+                 if abs(v) > 1e-10}
+    return coef_dict, r2_log, r2_lin, log_pred
 
-    ss_r   = np.sum((y_log - log_pred)**2)
-    ss_t   = np.sum((y_log - y_log.mean())**2)
-    r2_log = 1 - ss_r / ss_t if ss_t else 0.0
-
-    uts_pred = np.exp(log_pred)
-    uts_true = np.exp(y_log)
-    ss_ru  = np.sum((uts_true - uts_pred)**2)
-    ss_tu  = np.sum((uts_true - uts_true.mean())**2)
-    r2_uts = 1 - ss_ru / ss_tu if ss_tu else 0.0
-
-    coef_dict = {lbl: float(v)
-                 for lbl, v in zip(feat_labels, coeffs) if abs(v) > 1e-10}
-    return coef_dict, r2_log, r2_uts, log_pred
-
-# Threshold tuning helper (shared by main fit and sensitivity loop)
 def tune_threshold(y_log, Phi, feat_labels, thresholds, r2_floor=0.55):
-    best_thresh = thresholds[0]
-    best_score  = -np.inf
+    best_thresh = thresholds[0]; best_score = -np.inf
     for thresh in thresholds:
         try:
             cd, r2l, _, _ = fit_sindy_log(y_log, thresh, Phi, feat_labels)
             nact = len(cd)
-            if r2l < r2_floor or nact < 2:
-                continue
+            if r2l < r2_floor or nact < 2: continue
             score = r2l + max(0, len(feat_labels) - nact) * 0.015
-            if score > best_score:
-                best_score, best_thresh = score, thresh
-        except Exception:
-            continue
+            if score > best_score: best_score, best_thresh = score, thresh
+        except Exception: continue
     return best_thresh
 
-thresholds  = np.logspace(-3, 1, 150)
-
-print("\n  Tuning STLSQ threshold:")
-best_thresh = tune_threshold(log_y, Phi_final, FEAT_ACTIVE, thresholds)
-print(f"  Best threshold = {best_thresh:.5f}")
-
-coefs_act, r2_act_log, r2_act_uts, logp_act = fit_sindy_log(
-    log_y, best_thresh, Phi_final, FEAT_ACTIVE)
-n_act_t = len(coefs_act)
-print(f"\n  SINDy (actual RT):  R²_log={r2_act_log:.4f}  "
-      f"R²_UTS={r2_act_uts:.4f}  "
-      f"{n_act_t} active: {list(coefs_act.keys())}")
-
-coefs_preds  = {}
-r2_preds_log = {}
-r2_preds_uts = {}
-logp_ml      = {}
-for nm in ML:
-    log_ml = np.log(np.clip(RES[nm]['ypall'], 1.0, None))
-    cd, r2l, r2u, lp = fit_sindy_log(log_ml, best_thresh, Phi_final, FEAT_ACTIVE)
-    coefs_preds[nm]  = cd
-    r2_preds_log[nm] = r2l
-    r2_preds_uts[nm] = r2u
-    logp_ml[nm]      = lp
-    print(f"  SINDy ({nm}): R²_log={r2l:.4f}  R²_UTS={r2u:.4f}  "
-          f"{len(cd)} active: {list(cd.keys())}")
-
-# ── 5. EQUATIONS ──────────────────────────────────────────────────────
-def fmt_eq(coef_dict, ylbl='log(UTS)'):
-    lines = []
-    if 'C0' in coef_dict:
-        v   = coef_dict['C0']
-        K_e = np.exp(v) if abs(v) < 15 else float('nan')
-        lines.append(f"  {v:+.5g}  [C0 → K≈{K_e:.1f} MPa  |  OLS K={K_ro:.1f} MPa]")
-    for k, v in coef_dict.items():
-        if k == 'C0':
+def identifiability_check(Phi_full, feat_labels, log_y, id_thresh=0.10, verbose=True):
+    id_flags = {}; feat_stds = {}
+    thr = id_thresh * log_y.std()
+    if verbose:
+        print(f"  Target std={log_y.std():.5f}  ID-thr={thr:.5f}")
+        print(f"  {'Feature':<22} {'std':>10} {'identifiable?':>14}")
+        print("  " + "-"*48)
+    for i, lbl in enumerate(feat_labels):
+        col = Phi_full[:, i]; s = col.std(); feat_stds[lbl] = s
+        if lbl == 'C0':
+            id_flags[lbl] = True
+            if verbose: print(f"  {'C0':<22} {'(intercept)':>10} {'YES':>14}")
             continue
-        ann = ""
-        if k == 'log(sr)':
-            ann = f"   ← OLS m={m_ro:+.5f}"
-        elif k == 'log(eps)':
-            ann = f"   ← OLS p={p_ro:+.5f}"
-        lines.append(f"  {v:+.5g} · {k}{ann}")
-    if not lines:
-        return f"  {ylbl} = 0  (no active terms)"
-    return f"  {ylbl} =\n" + "\n".join(lines)
+        ok = s >= thr; id_flags[lbl] = ok
+        flag = "YES" if ok else "*** WEAK ***"
+        if verbose: print(f"  {lbl:<22} {s:>10.5f} {flag:>14}")
+    return id_flags, feat_stds
 
-print("\n" + "="*65)
-print("STEP 5: DISCOVERED EQUATIONS  (log(UTS) space, RT only)")
-print("="*65)
-print(f"\n  -- OLS R-O reference --")
-print(f"  log(UTS) = {logK_ro:+.5f}"
-      f"  {m_ro:+.5f}·log(sr)"
-      f"  {p_ro:+.5f}·log(eps)")
-print(f"\n  -- SINDy on ACTUAL RT  "
-      f"(R²_log={r2_act_log:.4f}, R²_UTS={r2_act_uts:.4f}) --")
-print(fmt_eq(coefs_act))
-for nm in ML:
-    print(f"\n  -- SINDy on {nm}  "
-          f"(ML err={RES[nm]['med_err']:.1f}%, "
-          f"R²_log={r2_preds_log[nm]:.4f}) --")
-    print(fmt_eq(coefs_preds[nm]))
-
-# ── 6. SIMILARITY ─────────────────────────────────────────────────────
-print("\n" + "="*65)
-print("STEP 6: EQUATION SIMILARITY  (log-space, identifiability-aware)")
-print("="*65)
-
-analytic_ref = {
-    'C0':       logK_ro,
-    'log(sr)':  m_ro,
-    'log(eps)': p_ro,
-}
-
-def compute_sim(sindy_coefs, ref, id_flags_map):
+def qr_prune(Phi_id, id_labels, cond_target=50.0, verbose=True):
     """
-    Similarity rules:
-      - Feature identifiable   + SINDy kept it   → 1 - |rel_err|  clamped [-1,1]
-      - Feature identifiable   + SINDy dropped it → 0.0
-      - Feature NOT identifiable (weak variance)  → NaN  (excluded from mean)
-    FIX-D: near-zero fallback uses data-driven scale instead of magic 0.1
+    FIX-I: returns (Phi_final, active_labels, cond_final, dropped_labels).
+    Prints which column was dropped at each step and reports condition
+    contribution so physically unexpected drops are visible.
     """
+    col_norms = np.linalg.norm(Phi_id, axis=0, keepdims=True)
+    col_norms[col_norms==0] = 1.0
+    _, _, piv   = scipy_qr(Phi_id / col_norms, pivoting=True)
+    cond_prev   = np.linalg.cond(Phi_id)
+    keep_idx    = list(range(len(id_labels)))
+    piv_order   = list(piv)
+    dropped     = []
+
+    if verbose:
+        print(f"  QR pivot order: {[id_labels[i] for i in piv]}")
+        print(f"  Initial cond = {cond_prev:.1f}  (target ≤ {cond_target:.0f})")
+
+    while len(keep_idx) > 2:
+        cond_now = np.linalg.cond(Phi_id[:, keep_idx])
+        if cond_now <= cond_target:
+            break
+        for cand in reversed(piv_order):
+            if cand in keep_idx:
+                # measure condition improvement from dropping this column
+                trial = [k for k in keep_idx if k != cand]
+                cond_trial = np.linalg.cond(Phi_id[:, trial])
+                if verbose:
+                    print(f"    Drop '{id_labels[cand]}':  "
+                          f"cond {cond_now:.1f} → {cond_trial:.1f}"
+                          + ("  *** physically primary term ***"
+                             if id_labels[cand] in ('log(eps)', 'log(sr_inst)',
+                                                     'log(sr)') else ""))
+                keep_idx.remove(cand); piv_order.remove(cand)
+                dropped.append(id_labels[cand])
+                break
+
+    Phi_fin  = Phi_id[:, keep_idx]
+    cond_fin = np.linalg.cond(Phi_fin)
+    active   = [id_labels[i] for i in keep_idx]
+    if verbose:
+        print(f"  Final cond={cond_fin:.1f}  "
+              f"kept={active}  dropped={dropped if dropped else 'none'}")
+    return Phi_fin, active, cond_fin, dropped
+
+def compute_sim(sindy_coefs, ref, id_flags_map, log_y_std):
     rows = []
     for param, ana in ref.items():
         identifiable = id_flags_map.get(param, True)
         sval         = sindy_coefs.get(param, 0.0)
-
         if not identifiable:
             rows.append({'param': param, 'OLS_ref': ana, 'sindy': sval,
                          'rel_err': np.nan, 'similarity': np.nan,
-                         'identifiable': False})
-            continue
-
+                         'identifiable': False}); continue
         if abs(ana) > 0.01:
             rel_err = (ana - sval) / ana
             sim     = float(np.clip(1.0 - abs(rel_err), -1.0, 1.0))
         else:
-            # FIX-D: use data-driven scale rather than the arbitrary constant 0.1
-            scale   = max(abs(ana), 0.1 * log_y.std())
-            abs_err = abs(ana - sval)
+            scale   = max(abs(ana), 0.1 * log_y_std)
             rel_err = np.nan
-            sim     = float(np.clip(1.0 - abs_err / scale, -1.0, 1.0))
-
+            sim     = float(np.clip(1.0 - abs(ana-sval)/scale, -1.0, 1.0))
         rows.append({'param': param, 'OLS_ref': ana, 'sindy': sval,
                      'rel_err': rel_err, 'similarity': sim,
                      'identifiable': True})
     return pd.DataFrame(rows)
 
-df_sim_act = compute_sim(coefs_act, analytic_ref, id_flags)
-print(f"\n  {'Param':<18} {'OLS':>9} {'SINDy':>9} "
-      f"{'rel_err':>9} {'sim':>7} {'id?':>10}")
-print("  " + "-"*64)
-for _, r in df_sim_act.iterrows():
-    re  = f"{r['rel_err']:.4f}" if not np.isnan(r['rel_err'])   else "n/a"
-    si  = f"{r['similarity']:.4f}" if not np.isnan(r['similarity']) else "NaN"
-    idf = "YES" if r['identifiable'] else "WEAK→NaN"
-    print(f"  {r['param']:<18} {r['OLS_ref']:>9.5f} {r['sindy']:>9.5f} "
-          f"{re:>9} {si:>7} {idf:>10}")
+def fmt_eq(coef_dict, ylbl='log(σ)'):
+    if not coef_dict: return f"  {ylbl} = 0"
+    lines = []
+    if 'C0' in coef_dict:
+        v = coef_dict['C0']
+        lines.append(f"  {v:+.5g}  [K≈{np.exp(v):.1f} MPa]")
+    for k, v in coef_dict.items():
+        if k != 'C0': lines.append(f"  {v:+.5g} · {k}")
+    return f"  {ylbl} =\n" + "\n".join(lines)
 
-mean_sim_act = df_sim_act['similarity'].dropna().mean()
-n_id         = df_sim_act['identifiable'].sum()
-print(f"\n  Mean similarity (identifiable terms only, n={n_id}): {mean_sim_act:.4f}")
-print(f"  1.0=exact | 0.0=100% off | <0=wrong direction | NaN=unidentifiable")
+thresholds = np.logspace(-3, 1, 150)
+noise_levels = [0, 5, 10, 20, 30, 50, 75, 100]
 
-model_rows = []
-for nm in ML:
-    dfs  = compute_sim(coefs_preds[nm], analytic_ref, id_flags)
-    msim = dfs['similarity'].dropna().mean()
-    model_rows.append({
-        'model': nm, 'test_r2': RES[nm]['te_r2'],
-        'median_err_pct': RES[nm]['med_err'],
-        **{f"sim_{r['param']}": r['similarity'] for _, r in dfs.iterrows()},
-        'mean_similarity': msim,
-    })
-    print(f"  {nm:<14} ML err={RES[nm]['med_err']:.1f}%  "
-          f"mean_sim={msim:.4f}")
-df_models = pd.DataFrame(model_rows)
-
-# ── 7. SENSITIVITY ────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# ANALYSIS A: POINT-WISE — THREE SR FILTER LEVELS
+# ══════════════════════════════════════════════════════════════════════
 print("\n" + "="*65)
-print("STEP 7: SENSITIVITY – Noise → SINDy equation quality")
+print("ANALYSIS A: POINT-WISE  σ(ε, dε/dt)  — 3 SR FILTER LEVELS")
 print("="*65)
 
-noise_levels = [0, 5, 10, 20, 30, 50, 75, 100]
-rng2 = np.random.default_rng(7)
-sens_rows = []
+FEAT_LABELS_PW = ['C0', 'log(eps)', 'log(eps)^2', 'log(sr_inst)', 'H_c', 'F_enc']
 
-for s in noise_levels:
-    y_n    = np.clip(UTS + rng2.normal(0, s, len(UTS)), 1.0, None)
+def build_phi_pw(Hc, F, l_eps, l_sr):
+    return np.column_stack([
+        np.ones(len(Hc)), l_eps, l_eps**2, l_sr, Hc, F
+    ])
+
+pw_results = {}   # keyed by filter label
+
+rng_sens = np.random.default_rng(7)
+
+for flabel, fmethod, fparam in SR_FILTERS:
+    print(f"\n{'─'*65}")
+    print(f"  FILTER: {flabel}  "
+          + (f"(±{fparam}× specimen median sr)"
+             if fmethod=='factor'
+             else f"(global 1–99 pct: [{pct_lo:.2e}, {pct_hi:.2e}])"))
+    print(f"{'─'*65}")
+
+    df_f = df_pw_filtered[flabel]
+    n_f  = len(df_f)
+    if n_f < 20:
+        print(f"  SKIP: only {n_f} points after filtering")
+        continue
+
+    PW_stress   = df_f["Stress_MPa"].values.astype(float)
+    PW_strain   = df_f["Strain"].values.astype(float)
+    PW_sr       = df_f["sr_inst"].values.astype(float)
+    PW_He       = df_f["Heat_enc"].values.astype(float)
+    PW_Fe       = df_f["Form_enc"].values.astype(float)
+
+    H_c_pw   = PW_He - PW_He.mean()
+    log_y_pw = np.log(PW_stress)
+    log_eps  = np.log(np.clip(PW_strain, 1e-12, None))
+    log_sr   = np.log(np.clip(PW_sr,    1e-12, None))
+    sr_span  = np.log10(PW_sr.max()) - np.log10(PW_sr.min())
+
+    print(f"  N={n_f}  |  sr=[{PW_sr.min():.2e}, {PW_sr.max():.2e}]  "
+          f"|  span={sr_span:.2f} dec")
+
+    # Build Φ
+    Phi_full = build_phi_pw(H_c_pw, PW_Fe, log_eps, log_sr)
+
+    # Identifiability
+    print("\n  [Identifiability]")
+    id_flags, feat_stds = identifiability_check(Phi_full, FEAT_LABELS_PW,
+                                                log_y_pw, verbose=True)
+
+    # OLS reference
+    A_ols = np.column_stack([np.ones(n_f), log_sr, log_eps])
+    ro, *_ = np.linalg.lstsq(A_ols, log_y_pw, rcond=None)
+    logK_ols, m_ols, p_ols = ro
+    K_ols = np.exp(logK_ols)
+    print(f"\n  OLS: K={K_ols:.1f}  m={m_ols:.5f}  p={p_ols:.5f}")
+
+    # QR pruning
+    print("\n  [QR Decorrelation]")
+    id_cols   = [i for i, lbl in enumerate(FEAT_LABELS_PW) if id_flags[lbl]]
+    id_labels = [FEAT_LABELS_PW[i] for i in id_cols]
+    Phi_id    = Phi_full[:, id_cols]
+    Phi_fin, FEAT_ACT, cond_fin, dropped = qr_prune(Phi_id, id_labels,
+                                                      verbose=True)
+
+    # flag physically unexpected drops
+    primary_dropped = [d for d in dropped
+                       if d in ('log(eps)', 'log(sr_inst)')]
+    if primary_dropped:
+        print(f"  *** WARNING: primary physical terms dropped: "
+              f"{primary_dropped} ***")
+        print(f"      This means log(eps) and log(eps)^2 are too collinear "
+              f"for QR to distinguish them at this filter level.")
+
+    # SINDy
+    print("\n  [SINDy Fit]")
+    best_thresh = tune_threshold(log_y_pw, Phi_fin, FEAT_ACT,
+                                 thresholds, r2_floor=0.50)
+    coefs, r2_log, r2_lin, logp = fit_sindy_log(
+        log_y_pw, best_thresh, Phi_fin, FEAT_ACT)
+    print(f"  Threshold={best_thresh:.5f}  R²_log={r2_log:.4f}  "
+          f"R²_lin={r2_lin:.4f}")
+    print(f"  Active ({len(coefs)}): {list(coefs.keys())}")
+    print(fmt_eq(coefs))
+
+    analytic_ref = {'C0': logK_ols, 'log(sr_inst)': m_ols, 'log(eps)': p_ols}
+    df_sim = compute_sim(coefs, analytic_ref, id_flags, log_y_pw.std())
+    mean_sim = df_sim['similarity'].dropna().mean()
+    print(f"  Mean similarity (identifiable): {mean_sim:.4f}")
+
+    # Sensitivity
+    print("\n  [Sensitivity]")
+    rng_loc = np.random.default_rng(7)
+    sens_rows = []
+    for s_mpa in noise_levels:
+        y_n    = np.clip(PW_stress + rng_loc.normal(0, s_mpa, n_f), 1., None)
+        log_yn = np.log(y_n)
+        bt     = tune_threshold(log_yn, Phi_fin, FEAT_ACT,
+                                thresholds, r2_floor=0.45)
+        cn, r2l, r2u, _ = fit_sindy_log(log_yn, bt, Phi_fin, FEAT_ACT)
+        dfs    = compute_sim(cn, analytic_ref, id_flags, log_yn.std())
+        msim   = dfs['similarity'].dropna().mean()
+        pct    = 100 * s_mpa / max(PW_stress.mean(), 1)
+        sens_rows.append({'noise_MPa': s_mpa, 'pct_err': pct,
+                          'n_active': len(cn), 'mean_sim': msim,
+                          'r2_log': r2l,
+                          'sindy_m': cn.get('log(sr_inst)', 0),
+                          'sindy_p': cn.get('log(eps)', 0)})
+        print(f"    noise={s_mpa:>4} MPa ({pct:>5.1f}%)  "
+              f"active={len(cn)}  R²={r2l:.4f}  sim={msim:.4f}  "
+              f"m={cn.get('log(sr_inst)',0):+.5f}  "
+              f"p={cn.get('log(eps)',0):+.5f}")
+    df_sens = pd.DataFrame(sens_rows)
+    corr = pval = sl = ic = np.nan
+    pv = df_sens['pct_err'].values; sv = df_sens['mean_sim'].values
+    if not np.all(np.isnan(sv)) and len(pv) > 3:
+        try:
+            corr, pval = stats.pearsonr(pv, sv)
+            sl, ic, *_ = stats.linregress(pv, sv)
+            print(f"    Pearson r={corr:.4f}  p={pval:.4f}")
+        except Exception:
+            pass
+
+    pw_results[flabel] = dict(
+        df=df_f, n=n_f, sr_span=sr_span,
+        PW_stress=PW_stress, PW_strain=PW_strain, PW_sr=PW_sr,
+        H_c_pw=H_c_pw, PW_Fe=PW_Fe,
+        log_y_pw=log_y_pw, log_eps=log_eps, log_sr=log_sr,
+        id_flags=id_flags, feat_stds=feat_stds,
+        K_ols=K_ols, m_ols=m_ols, p_ols=p_ols, logK_ols=logK_ols,
+        FEAT_ACT=FEAT_ACT, Phi_fin=Phi_fin, cond_fin=cond_fin,
+        dropped=dropped, primary_dropped=primary_dropped,
+        coefs=coefs, r2_log=r2_log, r2_lin=r2_lin,
+        logp=logp, df_sim=df_sim, mean_sim=mean_sim,
+        df_sens=df_sens, corr=corr, pval=pval, sl=sl, ic=ic,
+        analytic_ref=analytic_ref,
+    )
+
+# cross-filter summary table
+print("\n" + "="*65)
+print("  CROSS-FILTER SUMMARY")
+print("="*65)
+hdr = f"  {'Filter':<8} {'N':>6} {'span':>6} {'cond':>7}  "
+hdr += "  ".join(f"{lbl:<14}" for lbl in FEAT_LABELS_PW)
+hdr += f"  {'R²_log':>7}  {'mean_sim':>8}"
+print(hdr); print("  " + "-"*len(hdr))
+for flabel, *_ in SR_FILTERS:
+    if flabel not in pw_results: continue
+    r = pw_results[flabel]
+    row = f"  {flabel:<8} {r['n']:>6} {r['sr_span']:>6.2f} {r['cond_fin']:>7.1f}  "
+    for lbl in FEAT_LABELS_PW:
+        status = ("KEPT" if lbl in r['FEAT_ACT']
+                  else "DROPPED" if lbl in r['id_flags'] and r['id_flags'][lbl]
+                  else "WEAK")
+        row += f"{status:<16}"
+    row += f"  {r['r2_log']:>7.4f}  {r['mean_sim']:>8.4f}"
+    print(row)
+
+# ══════════════════════════════════════════════════════════════════════
+# ANALYSIS B: UTS (unchanged from v5)
+# ══════════════════════════════════════════════════════════════════════
+print("\n" + "="*65)
+print("ANALYSIS B: UTS  (N=28, all RT forms)  — unchanged from v5")
+print("="*65)
+
+FEAT_LABELS_UTS = ['C0', 'log(sr)', 'log(eps)', 'log(eps)^2',
+                   'H_c', 'H_c*log(eps)']
+
+def build_phi_uts(Hc, l_eps, l_sr):
+    return np.column_stack([
+        np.ones(len(Hc)), l_sr, l_eps, l_eps**2, Hc, Hc*l_eps
+    ])
+
+Phi_uts_full = build_phi_uts(H_c_u, log_eps_u, log_sr_u)
+print("\n  [Identifiability]")
+id_flags_uts, feat_stds_uts = identifiability_check(
+    Phi_uts_full, FEAT_LABELS_UTS, log_y_uts)
+
+A_ro_u = np.column_stack([np.ones_like(log_sr_u), log_sr_u, log_eps_u])
+ro_u, *_ = np.linalg.lstsq(A_ro_u, log_y_uts, rcond=None)
+logK_ro, m_ro, p_ro = ro_u; K_ro = np.exp(logK_ro)
+print(f"\n  OLS: K={K_ro:.1f}  m={m_ro:.5f}  p={p_ro:.5f}")
+
+print("\n  [QR Decorrelation]")
+id_cols_u   = [i for i, lbl in enumerate(FEAT_LABELS_UTS) if id_flags_uts[lbl]]
+id_labels_u = [FEAT_LABELS_UTS[i] for i in id_cols_u]
+Phi_id_u    = Phi_uts_full[:, id_cols_u]
+Phi_fin_u, FEAT_ACT_UTS, cond_u, dropped_u = qr_prune(
+    Phi_id_u, id_labels_u, verbose=True)
+
+# ML
+print("\n  [ML Model]")
+def ml_feats_u(Hc, F, eps, sr, l_eps, l_sr):
+    return np.column_stack([
+        np.ones_like(Hc), Hc, Hc**2, F, eps, eps**2,
+        np.sqrt(np.clip(eps,0,None)), l_eps, sr, l_sr,
+        eps*l_sr, l_eps*l_sr, Hc*l_eps, Hc*l_sr,
+    ])
+X_all_u = ml_feats_u(H_c_u, Form_enc_u, eps_at_UTS, strain_rate,
+                     log_eps_u, log_sr_u)
+sel_u   = SelectKBest(f_regression, k=min(10, X_all_u.shape[1])).fit(X_all_u, UTS)
+X_sc_u  = StandardScaler().fit_transform(sel_u.transform(X_all_u))
+n_s_u   = len(UTS)
+if n_s_u >= 20:
+    bins_u = np.digitize(UTS, np.percentile(UTS,[20,40,60,80]))
+    tr_i_u, te_i_u = next(
+        StratifiedShuffleSplit(1,test_size=0.25,random_state=42
+                               ).split(X_sc_u, bins_u))
+else:
+    sp = max(1, int(n_s_u*0.75))
+    tr_i_u, te_i_u = np.arange(sp), np.arange(sp, n_s_u)
+Xtr_u,Xte_u = X_sc_u[tr_i_u],X_sc_u[te_i_u]
+ytr_u,yte_u = UTS[tr_i_u],UTS[te_i_u]
+n_cv_u = min(5, max(2, len(tr_i_u)//5))
+rcv_u  = GridSearchCV(Ridge(),{'alpha':[0.1,1,10,50,100,500]},
+                      cv=n_cv_u,scoring='r2').fit(Xtr_u,ytr_u)
+ridge_u = rcv_u.best_estimator_
+rf_u    = RandomForestRegressor(300,max_depth=6,
+              min_samples_split=max(4,len(tr_i_u)//15),
+              min_samples_leaf=max(2,len(tr_i_u)//25),
+              max_features='sqrt',random_state=42).fit(Xtr_u,ytr_u)
+ens_u   = VotingRegressor([('r1',ridge_u),
+                            ('r2',Ridge(alpha=rcv_u.best_params_['alpha'])),
+                            ('rf',rf_u)]).fit(Xtr_u,ytr_u)
+ML_u    = {'Ridge':ridge_u,'RandomForest':rf_u,'Ensemble':ens_u}
+RES_u   = {}
+for nm,m_est in ML_u.items():
+    yp  = m_est.predict(Xte_u)
+    err = np.abs((yp-yte_u)/np.clip(np.abs(yte_u),1,None))*100
+    RES_u[nm] = dict(tr_r2=m_est.score(Xtr_u,ytr_u),
+                     te_r2=m_est.score(Xte_u,yte_u),
+                     med_err=np.median(err), ypall=m_est.predict(X_sc_u))
+    print(f"  {nm:<14} TrainR²={RES_u[nm]['tr_r2']:.4f}  "
+          f"TestR²={RES_u[nm]['te_r2']:.4f}  "
+          f"MedianErr={RES_u[nm]['med_err']:.1f}%")
+best_ml_u = max(RES_u, key=lambda k: RES_u[k]['te_r2'])
+
+print("\n  [SINDy Fit]")
+best_thresh_u = tune_threshold(log_y_uts,Phi_fin_u,FEAT_ACT_UTS,
+                               thresholds,r2_floor=0.55)
+coefs_u,r2_u_log,r2_u_lin,logp_u = fit_sindy_log(
+    log_y_uts,best_thresh_u,Phi_fin_u,FEAT_ACT_UTS)
+print(f"  Threshold={best_thresh_u:.5f}  R²_log={r2_u_log:.4f}  R²_UTS={r2_u_lin:.4f}")
+print(fmt_eq(coefs_u,'log(UTS)'))
+
+analytic_ref_uts = {'C0':logK_ro,'log(sr)':m_ro,'log(eps)':p_ro}
+df_sim_u  = compute_sim(coefs_u,analytic_ref_uts,id_flags_uts,log_y_uts.std())
+mean_sim_u = df_sim_u['similarity'].dropna().mean()
+print(f"  Mean similarity: {mean_sim_u:.4f}")
+
+print("\n  [Sensitivity]")
+rng3 = np.random.default_rng(11)
+sens_rows_u = []
+for s_mpa in noise_levels:
+    y_n = np.clip(UTS+rng3.normal(0,s_mpa,len(UTS)),1.,None)
     log_yn = np.log(y_n)
+    bt = tune_threshold(log_yn,Phi_fin_u,FEAT_ACT_UTS,thresholds,r2_floor=0.50)
+    cn,r2l,r2u,_ = fit_sindy_log(log_yn,bt,Phi_fin_u,FEAT_ACT_UTS)
+    dfs = compute_sim(cn,analytic_ref_uts,id_flags_uts,log_yn.std())
+    msim = dfs['similarity'].dropna().mean()
+    pct  = 100*s_mpa/max(UTS.mean(),1)
+    sens_rows_u.append({'noise_MPa':s_mpa,'pct_err':pct,
+                        'n_active':len(cn),'mean_sim':msim,
+                        'r2_log':r2l,'sindy_m':cn.get('log(sr)',0),
+                        'sindy_p':cn.get('log(eps)',0)})
+    print(f"  noise={s_mpa:>4} MPa ({pct:>5.1f}%)  active={len(cn)}  "
+          f"R²={r2l:.4f}  sim={msim:.4f}")
+df_sens_u = pd.DataFrame(sens_rows_u)
+corr_u = pval_u = sl_u = ic_u = np.nan
+pv_u = df_sens_u['pct_err'].values; sv_u = df_sens_u['mean_sim'].values
+if not np.all(np.isnan(sv_u)) and len(pv_u) > 3:
+    try:
+        corr_u,pval_u = stats.pearsonr(pv_u,sv_u)
+        sl_u,ic_u,*_ = stats.linregress(pv_u,sv_u)
+        print(f"  Pearson r={corr_u:.4f}  p={pval_u:.4f}")
+    except Exception: pass
 
-    # FIX-E: re-tune threshold at each noise level; using the clean-data
-    # threshold at high noise inflates n_active with spurious terms.
-    best_t_s = tune_threshold(log_yn, Phi_final, FEAT_ACTIVE, thresholds,
-                              r2_floor=0.50)
-    cn, r2l, r2u, _ = fit_sindy_log(log_yn, best_t_s, Phi_final, FEAT_ACTIVE)
-
-    dfs    = compute_sim(cn, analytic_ref, id_flags)
-    msim   = dfs['similarity'].dropna().mean()
-    pct    = 100 * s / max(UTS.mean(), 1)
-    m_v    = cn.get('log(sr)',  0)
-    p_v    = cn.get('log(eps)', 0)
-    sens_rows.append({'noise_MPa': s, 'approx_pct_err': pct,
-                      'n_active': len(cn), 'mean_sim': msim,
-                      'r2_log': r2l, 'r2_uts': r2u,
-                      'sindy_m': m_v, 'sindy_p': p_v,
-                      'thresh_used': best_t_s})
-    print(f"  noise={s:>4} MPa ({pct:>5.1f}%)  thresh={best_t_s:.5f}  "
-          f"active={len(cn)}  R²_log={r2l:.4f}  sim={msim:.4f}  "
-          f"m={m_v:+.5f}  p={p_v:+.5f}")
-
-df_sens = pd.DataFrame(sens_rows)
-pv = df_sens['approx_pct_err'].values
-sv = df_sens['mean_sim'].values
-
-corr = pval = sl = ic = at10 = np.nan
-if len(pv) > 3 and not np.all(np.isnan(sv)):
-    corr, pval = stats.pearsonr(pv, sv)
-    sl, ic, *_ = stats.linregress(pv, sv)
-    at10 = ic + sl * 10
-    print(f"\n  Pearson r = {corr:.4f}  (p={pval:.4f})")
-    print(f"  Trend: sim = {ic:.4f} + {sl:+.5f}·(%err)")
-    print(f"  At 10% pred error: sim ≈ {at10:.4f}")
-
-# ── 8. SAVE ───────────────────────────────────────────────────────────
-df_sim_act.to_csv(OUT/"sindy_617t_equation_similarity.csv",
-                  index=False, float_format='%.6f')
-df_sens.to_csv(   OUT/"sindy_617t_sensitivity_analysis.csv",
-                  index=False, float_format='%.6f')
-df_models.to_csv( OUT/"sindy_617t_model_comparison.csv",
-                  index=False, float_format='%.6f')
-eq_rows = [{'term': lbl,
-             'OLS_ref': analytic_ref.get(lbl, np.nan),
-             'identifiable': id_flags.get(lbl, True),
-             'sindy_actual': coefs_act.get(lbl, 0.),
-             **{f'sindy_{nm}': coefs_preds[nm].get(lbl, 0.) for nm in ML}}
-           for lbl in FEAT_LABELS_FULL]
-pd.DataFrame(eq_rows).to_csv(OUT/"sindy_617t_discovered_equations.csv",
-                              index=False, float_format='%.6f')
-if REAL and df_rt is not None:
-    df_rt.to_csv(OUT/"sindy_617t_RT_specimens.csv",  index=False, float_format='%.6f')
-    df_ht.to_csv(OUT/"sindy_617t_HT_specimens.csv",  index=False, float_format='%.6f')
-
-id_report = pd.DataFrame([
-    {'feature': lbl, 'std': feat_stds[lbl],
-     'id_threshold': ID_THRESH * log_y.std(),
-     'identifiable': id_flags[lbl]}
-    for lbl in FEAT_LABELS_FULL
-])
-id_report.to_csv(OUT/"sindy_617t_identifiability.csv",
+# ══════════════════════════════════════════════════════════════════════
+# SAVE CSVs
+# ══════════════════════════════════════════════════════════════════════
+print("\n  Saving CSVs...")
+for flabel in pw_results:
+    r = pw_results[flabel]
+    r['df_sim'].to_csv(
+        OUT/f"sindy_617t_pw_{flabel.lower()}_similarity.csv",
+        index=False, float_format='%.6f')
+    r['df_sens'].to_csv(
+        OUT/f"sindy_617t_pw_{flabel.lower()}_sensitivity.csv",
+        index=False, float_format='%.6f')
+df_sim_u.to_csv(OUT/"sindy_617t_uts_similarity_v6.csv",
+                index=False, float_format='%.6f')
+df_sens_u.to_csv(OUT/"sindy_617t_uts_sensitivity_v6.csv",
                  index=False, float_format='%.6f')
-print("\n  CSVs saved.")
+if REAL and df_rt is not None:
+    df_rt.to_csv(OUT/"sindy_617t_RT_specimens_v6.csv",
+                 index=False, float_format='%.6f')
+print("  CSVs saved.")
 
-# ── 9. VISUALISATION ──────────────────────────────────────────────────
-DARK='#0d1117'; PANEL='#161b22'; GRID='#21262d'
-C1='#58a6ff'; C2='#f85149'; C3='#3fb950'; C4='#d29922'; C5='#bc8cff'; TEXT='#c9d1d9'
-MC = [C1, C3, C4]
-HC = [C1, C3, C4, C5]
-
-def sax(ax, title, xl='', yl=''):
-    ax.set_facecolor(PANEL)
-    for sp in ax.spines.values(): sp.set_edgecolor(GRID)
-    ax.tick_params(colors=TEXT, labelsize=8)
-    ax.set_title(title, color=C1, fontsize=9, fontweight='bold', pad=6)
-    if xl: ax.set_xlabel(xl, color=TEXT, fontsize=8)
-    if yl: ax.set_ylabel(yl, color=TEXT, fontsize=8)
-    ax.grid(True, color=GRID, alpha=0.55, lw=0.5)
-
-n_heats    = int(Heat_enc.max()) + 1
-uts_ll     = [UTS.min() - 20, UTS.max() + 20]
-y_best     = RES[best_ml]['ypall']
-yp_act_uts = np.exp(logp_act)
-
-fig = plt.figure(figsize=(22, 20), facecolor=DARK)
-gs  = gridspec.GridSpec(3, 3, figure=fig, hspace=0.50, wspace=0.38)
-
-# P1 – RT vs HT scatter
-ax = fig.add_subplot(gs[0, 0])
-if REAL and df_ht is not None:
-    ax.scatter(df_rt['eps_at_UTS'], df_rt['UTS'],
-               s=45, alpha=0.85, color=C1, edgecolors='none', label='RT (used)')
-    ax.scatter(df_ht['eps_at_UTS'], df_ht['UTS'],
-               s=45, alpha=0.85, color=C2, marker='x', lw=1.5, label='HT/outlier')
-else:
-    ax.scatter(eps_at_UTS, UTS, s=40, alpha=0.8, color=C1, edgecolors='none')
-ax.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
-sax(ax, 'All Specimens: UTS vs eps@UTS\n(RT=blue, HT/outlier=red×)',
-    'eps @ UTS', 'UTS (MPa)')
-
-# P2 – ML predicted vs actual
-ax2 = fig.add_subplot(gs[0, 1])
-for hi in range(n_heats):
-    mask = Heat_enc == hi
-    ax2.scatter(UTS[mask], y_best[mask], s=50, alpha=0.85,
-                color=HC[hi % len(HC)], edgecolors='none', label=f"Heat {hi}")
-ax2.plot(uts_ll, uts_ll, '--', color=C2, lw=1.5)
-ax2.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
-sax(ax2, f'ML ({best_ml}) RT  Actual vs Predicted',
-    'Actual UTS (MPa)', 'Predicted UTS (MPa)')
-ax2.text(0.05, 0.92, f"R²={RES[best_ml]['te_r2']:.4f}",
-         transform=ax2.transAxes, color=C3, fontsize=9, fontweight='bold')
-
-# P3 – SINDy on RT actual
-ax3 = fig.add_subplot(gs[0, 2])
-for hi in range(n_heats):
-    mask = Heat_enc == hi
-    ax3.scatter(UTS[mask], yp_act_uts[mask], s=50, alpha=0.85,
-                color=HC[hi % len(HC)], edgecolors='none')
-ax3.plot(uts_ll, uts_ll, '--', color=C2, lw=1.5)
-sax(ax3, f'SINDy (RT, log-space)  R²_UTS={r2_act_uts:.4f}\n'
-         f'{n_act_t} active of {len(FEAT_ACTIVE)} retained features',
-    'Actual UTS (MPa)', 'SINDy UTS (MPa)')
-
-# P4 – Identifiability bar chart
-ax4 = fig.add_subplot(gs[1, 0])
-feat_names = list(feat_stds.keys())
-stds_vals  = [feat_stds[f] for f in feat_names]
-colors_id  = [C3 if id_flags[f] else C2 for f in feat_names]
-bars = ax4.barh(feat_names, stds_vals, color=colors_id, alpha=0.85, edgecolor=PANEL)
-thresh_line = ID_THRESH * log_y.std()
-ax4.axvline(thresh_line, color=C4, ls='--', lw=1.5,
-            label=f'ID threshold ({ID_THRESH:.0%}·σ_y)')
-ax4.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
-for bar, lbl in zip(bars, feat_names):
-    tag = " ✓" if id_flags[lbl] else " WEAK"
-    ax4.text(bar.get_width() + thresh_line * 0.05, bar.get_y() + bar.get_height()/2,
-             tag, va='center', fontsize=7, color=TEXT)
-sax(ax4, 'Feature Identifiability\n(green=OK, red=too little variance)',
-    'std(feature column)', '')
-ax4.set_facecolor(PANEL)
-
-# P5 – Similarity bars (identifiability-aware)
-ax5 = fig.add_subplot(gs[1, 1])
-plabs = list(analytic_ref.keys())
-xp    = np.arange(len(plabs))
-w     = 0.20
-srcs  = [('SINDy(actual)', C1, df_sim_act)]
-for nm, col in zip(ML, MC[1:]):
-    srcs.append((nm, col, compute_sim(coefs_preds[nm], analytic_ref, id_flags)))
-for i, (lbl, col, df_s) in enumerate(srcs):
-    off  = (i - len(srcs)/2 + 0.5) * w
-    vals = df_s['similarity'].fillna(-0.05).values
-    bars = ax5.bar(xp + off, vals, w, label=lbl, color=col, alpha=0.85,
-                   edgecolor=PANEL)
-    for bar, val, idf in zip(bars, df_s['similarity'].values,
-                              df_s['identifiable'].values):
-        tag = f'{val:.2f}' if not np.isnan(val) else 'NaN'
-        ax5.text(bar.get_x() + bar.get_width()/2,
-                 max(bar.get_height(), 0) + 0.03,
-                 tag, ha='center', va='bottom', fontsize=6.5, color=TEXT)
-ax5.axhline(1.0, color=TEXT, ls=':', lw=1, alpha=0.5)
-ax5.axhline(0.0, color=C2,  ls='--', lw=1, alpha=0.5)
-ax5.set_xticks(xp)
-ax5.set_xticklabels(plabs, fontsize=8, color=TEXT)
-ax5.set_ylim([-0.3, 1.5])
-ax5.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
-sax(ax5, 'Equation Similarity vs OLS\n(NaN=unidentifiable feature)',
-    '', 'Similarity')
-
-# P6 – Sensitivity
-ax6 = fig.add_subplot(gs[1, 2])
-ax6.plot(df_sens['approx_pct_err'], df_sens['mean_sim'], 'o-',
-         color=C1, lw=2, ms=6, label='Mean sim (id. only)')
-if not np.isnan(sl):
-    xf = np.linspace(0, df_sens['approx_pct_err'].max(), 200)
-    ax6.plot(xf, ic + sl*xf, '--', color=C2, lw=1.5,
-             label=f'Δ@10%={sl*10:+.3f}')
-ax6.axhline(1.0, color=C3, ls=':', alpha=0.5, lw=1)
-ax6.axhline(0.0, color=C4, ls=':', alpha=0.5, lw=1)
-ax6.set_ylim([-0.3, 1.3])
-ax6.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
-sax(ax6, 'Error Propagation: Pred. Error → Equation Quality',
-    'Approx. Prediction Error (%)', 'Mean Similarity (identifiable)')
-
-# P7 – Coefficient stability vs noise
-ax7 = fig.add_subplot(gs[2, 0])
-ax7.set_facecolor(PANEL)
-pa = df_sens['approx_pct_err'].values
-ax7.plot(pa, df_sens['sindy_p'].values, 's-', color=C3, lw=2, ms=5,
-         label='SINDy p [log(eps)]')
-ax7.axhline(p_ro, color=C3, ls='--', alpha=0.8, lw=1.5,
-            label=f'OLS p={p_ro:.5f}')
-if 'log(sr)' not in weak_feats:
-    ax7b = ax7.twinx()
-    ax7b.plot(pa, df_sens['sindy_m'].values, 'o-', color=C4, lw=2, ms=5)
-    ax7b.axhline(m_ro, color=C4, ls='--', alpha=0.8, lw=1.5)
-    ax7b.set_ylabel('m (rate exp)', color=C4, fontsize=8)
-    ax7b.tick_params(colors=TEXT, labelsize=7)
-else:
-    ax7.text(0.5, 0.5, 'log(sr) unidentifiable\n(SR span too narrow)',
-             ha='center', va='center', transform=ax7.transAxes,
-             fontsize=9, color=C2, fontstyle='italic')
-for sp in ax7.spines.values(): sp.set_edgecolor(GRID)
-ax7.tick_params(colors=TEXT, labelsize=8)
-ax7.grid(True, color=GRID, alpha=0.5, lw=0.5)
-ax7.set_title('Coefficient Stability vs Noise',
-              color=C1, fontsize=9, fontweight='bold')
-ax7.set_xlabel('Prediction Error (%)', color=TEXT, fontsize=8)
-ax7.set_ylabel('p (strain exp)', color=C3, fontsize=8)
-ax7.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
-
-# P8 – Model scatter
-ax8 = fig.add_subplot(gs[2, 1])
-for i, row in df_models.iterrows():
-    ax8.scatter(row['median_err_pct'], row['mean_similarity'],
-                s=250, color=MC[i % len(MC)], zorder=5,
-                edgecolors='white', lw=0.8)
-    ax8.annotate(row['model'], (row['median_err_pct'], row['mean_similarity']),
-                 textcoords='offset points', xytext=(8, 5),
-                 fontsize=9, color=MC[i % len(MC)], fontweight='bold')
-ax8.axhline(0, color=C2, ls='--', lw=1, alpha=0.5)
-sax(ax8, 'ML Model: Prediction Error vs Equation Similarity',
-    'Median Prediction Error (%)', 'Mean Equation Similarity')
-
-# P9 – Summary text
-ax9 = fig.add_subplot(gs[2, 2])
-ax9.set_facecolor(DARK)
-for sp in ax9.spines.values(): sp.set_edgecolor(GRID)
-ax9.axis('off')
-C0s = coefs_act.get('C0', 0)
-ps_ = coefs_act.get('log(eps)', np.nan)
-K_s = np.exp(C0s) if abs(C0s) < 15 else float('nan')
-# FIX-G: removed chr()-obfuscated key construction for 'log(sr)'
-sindy_m_str = ('dropped (weak)' if 'log(sr)' in weak_feats
-               else f"{coefs_act.get('log(sr)', 0):+.5g}")
-txt = [
-    "Alloy 617  |  Tensile  |  UTS  [v4]",
-    f"{'Real CSV' if REAL else 'Synthetic'}  "
-    f"RT={len(UTS)} / HT={len(df_ht) if REAL and df_ht is not None else 0}",
-    f"SR span: {sr_dec:.2f} dec | Φ cond: {cond_final:.1f}",
-    "",
-    "── Identifiability ────────────────",
-] + [
-    f"  {lbl:<18} {'OK' if id_flags[lbl] else 'WEAK (NaN)':>10}"
-    for lbl in FEAT_LABELS_FULL
-] + [
-    "",
-    "── OLS R-O (RT only) ──────────────",
-    f"  K={K_ro:.1f} MPa  m={m_ro:.5f}  p={p_ro:.5f}",
-    "",
-    f"── SINDy (R²_log={r2_act_log:.4f}, R²_UTS={r2_act_uts:.4f}) ─",
-    f"  C0={C0s:+.5g} → K≈{K_s:.1f} MPa",
-    f"  log(sr) = {sindy_m_str}",
-    f"  log(eps)= {ps_:+.5g}   OLS:{p_ro:+.5f}",
-    f"  ({n_act_t} of {len(FEAT_ACTIVE)} active)",
-    "",
-    "── Similarity (identifiable) ──────",
-] + [
-    f"  {r['param']:<16}: "
-    f"{'NaN (weak)' if not r['identifiable'] else f'{r.similarity:+.4f}'}"
-    for _, r in df_sim_act.iterrows()
-] + [
-    f"  MEAN = {mean_sim_act:+.4f}",
-    "",
-    "── Error Propagation ──────────────",
-    (f"  r={corr:.4f}  p={pval:.4f}" if not np.isnan(corr) else "  n/a"),
-    (f"  Δsim/10%err={sl*10:+.4f}" if not np.isnan(sl) else ""),
-    "",
-    "v4: QR index fix | STLSQ direct call",
-    "    noise re-tune | data-driven scale",
-    "    IQR skip <3   | no chr() obfusc.",
-]
-ax9.text(0.03, 0.97, "\n".join(txt), transform=ax9.transAxes,
-         fontsize=7.2, va='top', fontfamily='monospace', color=TEXT,
-         bbox=dict(boxstyle='round', facecolor=DARK, alpha=0.9))
-ax9.set_title('Summary [v4]', color=C1, fontsize=9, fontweight='bold')
-
-fig.suptitle(
-    "Alloy 617 Tensile – SINDy UTS Study  "
-    "[v4: QR index fix · STLSQ direct · noise re-tune · IQR fix · chr() fix]\n"
-    "SINDy in log(UTS) space  |  OLS R-O Reference  |  NaN for unidentifiable features",
+# ══════════════════════════════════════════════════════════════════════
+# FIGURE 1 – SR FILTER COMPARISON (point-wise)
+# ══════════════════════════════════════════════════════════════════════
+fig1 = plt.figure(figsize=(22, 18), facecolor=DARK)
+gs1  = gridspec.GridSpec(3, 3, figure=fig1, hspace=0.52, wspace=0.38)
+fig1.suptitle(
+    "Alloy 617 – Point-Wise Analysis  |  SR Filter Comparison  [v6]\n"
+    "TIGHT=±10×  |  MOD=±100×  |  PCT=global 1–99th percentile",
     fontsize=11, fontweight='bold', color=C1, y=0.999)
 
-plt.savefig(OUT/"sindy_617t_analysis.png", dpi=150,
+flist = [fl for fl, *_ in SR_FILTERS if fl in pw_results]
+
+for row_i, flabel in enumerate(flist):
+    r   = pw_results[flabel]
+    col = FILTER_COLORS[flabel]
+
+    # col 0 – stress vs strain scatter
+    ax = fig1.add_subplot(gs1[row_i, 0])
+    ax.scatter(r['PW_strain'], r['PW_stress'], s=5, alpha=0.35,
+               color=col, edgecolors='none')
+    sax(ax, f"{flabel}: Stress-Strain  (N={r['n']})\n"
+            f"SR span={r['sr_span']:.2f} dec  cond={r['cond_fin']:.1f}",
+        'Strain', 'Stress (MPa)')
+    # annotate dropped terms
+    if r['dropped']:
+        ax.text(0.02, 0.08, f"QR dropped: {r['dropped']}",
+                transform=ax.transAxes, fontsize=7.5, color=C2,
+                fontstyle='italic')
+
+    # col 1 – SINDy predicted vs actual
+    ax2 = fig1.add_subplot(gs1[row_i, 1])
+    pred = np.exp(r['logp'])
+    sl_lim = [r['PW_stress'].min()-20, r['PW_stress'].max()+20]
+    ax2.scatter(r['PW_stress'], pred, s=5, alpha=0.35,
+                color=col, edgecolors='none')
+    ax2.plot(sl_lim, sl_lim, '--', color=C2, lw=1.5)
+    ax2.text(0.04, 0.90,
+             f"R²_log={r['r2_log']:.4f}\nR²_lin={r['r2_lin']:.4f}\n"
+             f"sim={r['mean_sim']:.4f}",
+             transform=ax2.transAxes, color=col, fontsize=8.5,
+             fontweight='bold')
+    # annotate active equation terms
+    eq_str = "  ".join(
+        f"{k}={v:+.3f}" for k, v in r['coefs'].items() if k != 'C0')
+    ax2.text(0.04, 0.04, eq_str, transform=ax2.transAxes,
+             fontsize=7, color=TEXT)
+    sax(ax2, f"{flabel}: SINDy Actual vs Predicted",
+        'Actual σ (MPa)', 'Predicted σ (MPa)')
+
+    # col 2 – sensitivity curve
+    ax3 = fig1.add_subplot(gs1[row_i, 2])
+    ds  = r['df_sens']
+    ax3.plot(ds['pct_err'], ds['mean_sim'], 'o-',
+             color=col, lw=2, ms=5, label='mean sim')
+    ax3_r = ax3.twinx()
+    ax3_r.plot(ds['pct_err'], ds['r2_log'], 's--',
+               color=C5, lw=1.5, ms=4, alpha=0.7, label='R²_log')
+    ax3_r.set_ylabel('R²_log', color=C5, fontsize=8)
+    ax3_r.tick_params(colors=TEXT, labelsize=7)
+    for sp in ax3_r.spines.values(): sp.set_edgecolor(GRID)
+    if not np.isnan(r['sl']):
+        xf = np.linspace(0, ds['pct_err'].max(), 200)
+        ax3.plot(xf, r['ic'] + r['sl']*xf, '--', color=C2, lw=1,
+                 alpha=0.7, label=f"r={r['corr']:.3f}")
+    ax3.axhline(1.0, color=TEXT, ls=':', alpha=0.3)
+    ax3.axhline(0.0, color=C2,  ls=':', alpha=0.3)
+    ax3.set_ylim([-0.3, 1.3])
+    ax3.legend(fontsize=6.5, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+    sax(ax3, f"{flabel}: Noise Sensitivity",
+        'Noise (% of mean σ)', 'Mean Similarity')
+
+plt.savefig(OUT/"sindy_617t_v6_filter_comparison.png", dpi=150,
             bbox_inches='tight', facecolor=DARK)
 plt.close()
-print("  Saved: sindy_617t_analysis.png")
+print("  Saved: sindy_617t_v6_filter_comparison.png")
 
-# ── 10. FINAL SUMMARY ─────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# FIGURE 2 – CROSS-FILTER DIAGNOSTICS  (SR span, m/p stability, similarity)
+# ══════════════════════════════════════════════════════════════════════
+fig2 = plt.figure(figsize=(22, 12), facecolor=DARK)
+gs2  = gridspec.GridSpec(2, 3, figure=fig2, hspace=0.50, wspace=0.40)
+fig2.suptitle(
+    "Alloy 617 – Cross-Filter Diagnostics  [v6]\n"
+    "How SR spike removal changes identifiability, QR outcome, and equation quality",
+    fontsize=11, fontweight='bold', color=C1, y=0.999)
+
+flist_valid = [fl for fl, *_ in SR_FILTERS if fl in pw_results]
+x_pos = np.arange(len(flist_valid))
+bar_w = 0.32
+
+# P1 – N points and SR span per filter
+ax_a = fig2.add_subplot(gs2[0, 0])
+ns   = [pw_results[fl]['n']       for fl in flist_valid]
+spans= [pw_results[fl]['sr_span'] for fl in flist_valid]
+bars_n = ax_a.bar(x_pos - bar_w/2, ns, bar_w,
+                   color=[FILTER_COLORS[fl] for fl in flist_valid],
+                   alpha=0.85, edgecolor=PANEL, label='N points')
+ax_a2 = ax_a.twinx()
+ax_a2.bar(x_pos + bar_w/2, spans, bar_w, color=C5, alpha=0.6,
+          edgecolor=PANEL, label='SR span (dec)')
+ax_a2.set_ylabel('SR span (decades)', color=C5, fontsize=8)
+ax_a2.tick_params(colors=TEXT, labelsize=7)
+for sp in ax_a2.spines.values(): sp.set_edgecolor(GRID)
+ax_a.set_xticks(x_pos); ax_a.set_xticklabels(flist_valid, color=TEXT, fontsize=9)
+for bar, n in zip(bars_n, ns):
+    ax_a.text(bar.get_x()+bar.get_width()/2, bar.get_height()+5,
+              str(n), ha='center', va='bottom', fontsize=8, color=TEXT)
+sax(ax_a, 'Points Retained vs SR Span per Filter',
+    'Filter Level', 'N points')
+
+# P2 – QR drop outcome per filter
+ax_b = fig2.add_subplot(gs2[0, 1])
+ax_b.set_facecolor(PANEL)
+ax_b.axis('off')
+rows_tbl = []
+for fl in flist_valid:
+    r = pw_results[fl]
+    for lbl in FEAT_LABELS_PW:
+        if lbl == 'C0': continue
+        if not r['id_flags'].get(lbl, True):
+            status = 'WEAK'
+        elif lbl in r['FEAT_ACT']:
+            status = 'KEPT'
+        else:
+            status = 'DROPPED'
+        rows_tbl.append({'Filter': fl, 'Feature': lbl, 'Status': status})
+df_tbl = pd.DataFrame(rows_tbl).pivot(index='Feature', columns='Filter',
+                                       values='Status')
+# draw as text table
+col_x = {fl: 0.18 + i*0.27 for i, fl in enumerate(flist_valid)}
+ax_b.text(0.02, 0.97, 'QR Outcome per Filter', transform=ax_b.transAxes,
+          fontsize=9, color=C1, fontweight='bold', va='top')
+for i, fl in enumerate(flist_valid):
+    ax_b.text(col_x[fl], 0.88, fl, transform=ax_b.transAxes,
+              fontsize=8.5, color=FILTER_COLORS[fl], fontweight='bold',
+              ha='center')
+for j, feat in enumerate(df_tbl.index):
+    y = 0.78 - j*0.13
+    ax_b.text(0.02, y, feat, transform=ax_b.transAxes,
+              fontsize=8, color=TEXT, va='center')
+    for fl in flist_valid:
+        stat = df_tbl.loc[feat, fl] if fl in df_tbl.columns else '—'
+        col_stat = (C3 if stat=='KEPT' else
+                    C2 if stat=='DROPPED' else C4)
+        ax_b.text(col_x[fl], y, stat, transform=ax_b.transAxes,
+                  fontsize=8, color=col_stat, ha='center', va='center',
+                  fontweight='bold')
+ax_b.set_title('QR Feature Outcome Table',
+               color=C1, fontsize=9, fontweight='bold', pad=6)
+for sp in ax_b.spines.values(): sp.set_edgecolor(GRID)
+
+# P3 – R² and mean_sim per filter
+ax_c = fig2.add_subplot(gs2[0, 2])
+r2s  = [pw_results[fl]['r2_log']  for fl in flist_valid]
+sims = [pw_results[fl]['mean_sim'] for fl in flist_valid]
+ax_c.bar(x_pos - bar_w/2, r2s,  bar_w,
+         color=[FILTER_COLORS[fl] for fl in flist_valid],
+         alpha=0.85, edgecolor=PANEL, label='R²_log')
+ax_c.bar(x_pos + bar_w/2, sims, bar_w, color=C5, alpha=0.7,
+         edgecolor=PANEL, label='mean_sim')
+ax_c.axhline(1.0, color=TEXT, ls=':', lw=1, alpha=0.4)
+ax_c.set_xticks(x_pos); ax_c.set_xticklabels(flist_valid, color=TEXT, fontsize=9)
+ax_c.set_ylim([0, 1.2])
+ax_c.legend(fontsize=7.5, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+for i, (r2, sm) in enumerate(zip(r2s, sims)):
+    ax_c.text(i-bar_w/2, r2+0.02, f'{r2:.3f}', ha='center', fontsize=7.5, color=TEXT)
+    ax_c.text(i+bar_w/2, sm+0.02, f'{sm:.3f}', ha='center', fontsize=7.5, color=C5)
+sax(ax_c, 'Fit Quality vs Equation Similarity\nper SR Filter', 'Filter', 'Score')
+
+# P4 – m (rate exponent) stability across noise, all filters
+ax_d = fig2.add_subplot(gs2[1, 0])
+for fl in flist_valid:
+    ds = pw_results[fl]['df_sens']
+    ax_d.plot(ds['pct_err'], ds['sindy_m'], 'o-',
+              color=FILTER_COLORS[fl], lw=2, ms=5, label=fl)
+    ax_d.axhline(pw_results[fl]['m_ols'], color=FILTER_COLORS[fl],
+                 ls='--', lw=1, alpha=0.5)
+ax_d.axhline(0, color=TEXT, ls=':', lw=1, alpha=0.4)
+ax_d.legend(fontsize=8, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+sax(ax_d, 'Rate Exponent m Stability vs Noise\n(dashed = OLS reference)',
+    'Noise (% of mean σ)', 'SINDy m [log(sr_inst)]')
+
+# P5 – p (strain exponent) stability across noise, all filters
+ax_e = fig2.add_subplot(gs2[1, 1])
+for fl in flist_valid:
+    ds = pw_results[fl]['df_sens']
+    ax_e.plot(ds['pct_err'], ds['sindy_p'], 'o-',
+              color=FILTER_COLORS[fl], lw=2, ms=5, label=fl)
+    ax_e.axhline(pw_results[fl]['p_ols'], color=FILTER_COLORS[fl],
+                 ls='--', lw=1, alpha=0.5)
+ax_e.legend(fontsize=8, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+sax(ax_e, 'Strain Exponent p Stability vs Noise\n(dashed = OLS reference)',
+    'Noise (% of mean σ)', 'SINDy p [log(eps)]')
+
+# P6 – mean sim vs noise, all filters + UTS overlay
+ax_f = fig2.add_subplot(gs2[1, 2])
+for fl in flist_valid:
+    ds = pw_results[fl]['df_sens']
+    ax_f.plot(ds['pct_err'], ds['mean_sim'], 'o-',
+              color=FILTER_COLORS[fl], lw=2, ms=5, label=f'PW-{fl}')
+ax_f.plot(df_sens_u['pct_err'], df_sens_u['mean_sim'], 's--',
+          color=C2, lw=2, ms=5, label='UTS')
+ax_f.axhline(1.0, color=TEXT, ls=':', lw=1, alpha=0.3)
+ax_f.axhline(0.0, color=C4,  ls=':', lw=1, alpha=0.3)
+ax_f.set_ylim([-0.3, 1.3])
+ax_f.legend(fontsize=7.5, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+sax(ax_f, 'Noise Sensitivity Comparison\n(all filters + UTS)',
+    'Noise (% of mean)', 'Mean Similarity')
+
+plt.savefig(OUT/"sindy_617t_v6_cross_filter.png", dpi=150,
+            bbox_inches='tight', facecolor=DARK)
+plt.close()
+print("  Saved: sindy_617t_v6_cross_filter.png")
+
+# ══════════════════════════════════════════════════════════════════════
+# FIGURE 3 – UTS ANALYSIS (same layout as v5)
+# ══════════════════════════════════════════════════════════════════════
+fig3 = plt.figure(figsize=(22, 10), facecolor=DARK)
+gs3  = gridspec.GridSpec(2, 3, figure=fig3, hspace=0.50, wspace=0.38)
+fig3.suptitle(
+    f"Alloy 617 – UTS Specimen-Level Analysis  [v6]  N={len(UTS)} RT specimens\n"
+    f"SR span={sr_dec_u:.2f} dec  |  OLS: K={K_ro:.1f} m={m_ro:.4f} p={p_ro:.4f}",
+    fontsize=11, fontweight='bold', color=C1, y=0.999)
+
+ax_u1 = fig3.add_subplot(gs3[0, 0])
+if REAL and df_ht is not None:
+    ax_u1.scatter(df_rt['eps_at_UTS'], df_rt['UTS'],
+                  s=45, alpha=0.85, color=C1, edgecolors='none', label='RT')
+    ax_u1.scatter(df_ht['eps_at_UTS'], df_ht['UTS'],
+                  s=45, alpha=0.85, color=C2, marker='x', lw=1.5,
+                  label='HT/outlier')
+else:
+    ax_u1.scatter(eps_at_UTS, UTS, s=40, alpha=0.8, color=C1, edgecolors='none')
+ax_u1.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+sax(ax_u1, 'All Specimens: UTS vs eps@UTS', 'eps @ UTS', 'UTS (MPa)')
+
+ax_u2 = fig3.add_subplot(gs3[0, 1])
+y_best_u = RES_u[best_ml_u]['ypall']
+uts_ll   = [UTS.min()-20, UTS.max()+20]
+n_heats_u = int(Heat_enc_u.max()) + 1
+for hi in range(n_heats_u):
+    mask = Heat_enc_u == hi
+    ax_u2.scatter(UTS[mask], y_best_u[mask], s=55, alpha=0.85,
+                  color=HC[hi%len(HC)], edgecolors='none', label=f"Heat {hi}")
+ax_u2.plot(uts_ll, uts_ll, '--', color=C2, lw=1.5)
+ax_u2.text(0.05, 0.91, f"R²={RES_u[best_ml_u]['te_r2']:.4f}",
+           transform=ax_u2.transAxes, color=C3, fontsize=9, fontweight='bold')
+ax_u2.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+sax(ax_u2, f'ML ({best_ml_u}) Actual vs Predicted', 'Actual UTS', 'Predicted UTS')
+
+ax_u3 = fig3.add_subplot(gs3[0, 2])
+yp_uts = np.exp(logp_u)
+for hi in range(n_heats_u):
+    mask = Heat_enc_u == hi
+    ax_u3.scatter(UTS[mask], yp_uts[mask], s=55, alpha=0.85,
+                  color=HC[hi%len(HC)], edgecolors='none')
+ax_u3.plot(uts_ll, uts_ll, '--', color=C2, lw=1.5)
+ax_u3.text(0.05, 0.91,
+           f"R²_log={r2_u_log:.4f}\nR²_UTS={r2_u_lin:.4f}\n"
+           f"sim={mean_sim_u:.4f}",
+           transform=ax_u3.transAxes, color=C3, fontsize=9, fontweight='bold')
+sax(ax_u3, f'SINDy (UTS): Actual vs Predicted', 'Actual UTS', 'SINDy UTS')
+
+ax_u4 = fig3.add_subplot(gs3[1, 0])
+fn_u = list(feat_stds_uts.keys())
+col_id_u = [C3 if id_flags_uts[f] else C2 for f in fn_u]
+bars_u = ax_u4.barh(fn_u, [feat_stds_uts[f] for f in fn_u],
+                    color=col_id_u, alpha=0.85, edgecolor=PANEL)
+thr_u = 0.10 * log_y_uts.std()
+ax_u4.axvline(thr_u, color=C4, ls='--', lw=1.5, label='ID thresh')
+ax_u4.legend(fontsize=7, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+for bar, lbl in zip(bars_u, fn_u):
+    tag = " ✓" if id_flags_uts[lbl] else " WEAK"
+    ax_u4.text(bar.get_width()+thr_u*0.05, bar.get_y()+bar.get_height()/2,
+               tag, va='center', fontsize=7, color=TEXT)
+sax(ax_u4, 'Feature Identifiability (UTS)', 'std(feature)', '')
+
+ax_u5 = fig3.add_subplot(gs3[1, 1])
+plabs_u = list(analytic_ref_uts.keys()); xp_u = np.arange(len(plabs_u))
+bars_u5 = ax_u5.bar(xp_u,
+                     df_sim_u['similarity'].fillna(-0.05).values,
+                     color=[C3 if v else C4
+                            for v in df_sim_u['identifiable'].values],
+                     alpha=0.85, edgecolor=PANEL)
+ax_u5.axhline(1.0, color=TEXT, ls=':', lw=1, alpha=0.5)
+ax_u5.axhline(0.0, color=C2,  ls='--', lw=1, alpha=0.5)
+for bar, val in zip(bars_u5, df_sim_u['similarity'].values):
+    tag = f'{val:.3f}' if not np.isnan(val) else 'NaN'
+    ax_u5.text(bar.get_x()+bar.get_width()/2, max(bar.get_height(),0)+0.03,
+               tag, ha='center', va='bottom', fontsize=8, color=TEXT)
+ax_u5.set_xticks(xp_u); ax_u5.set_xticklabels(plabs_u, fontsize=8, color=TEXT)
+ax_u5.set_ylim([-0.3, 1.5])
+sax(ax_u5, f'Equation Similarity vs OLS (UTS)\nMean={mean_sim_u:.4f}', '', 'Similarity')
+
+ax_u6 = fig3.add_subplot(gs3[1, 2])
+ax_u6.plot(df_sens_u['pct_err'], df_sens_u['mean_sim'], 's-',
+           color=C2, lw=2, ms=5, label='UTS sim')
+ax_u6.plot(df_sens_u['pct_err'], df_sens_u['sindy_p'], '^--',
+           color=C3, lw=1.5, ms=4, label='SINDy p')
+ax_u6.axhline(p_ro, color=C3, ls=':', lw=1, alpha=0.6,
+              label=f'OLS p={p_ro:.4f}')
+ax_u6.set_ylim([-0.3, 1.3])
+ax_u6.legend(fontsize=7.5, facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+sax(ax_u6, 'UTS Noise Sensitivity', 'Noise (% of mean UTS)', 'Value')
+
+plt.savefig(OUT/"sindy_617t_v6_uts.png", dpi=150,
+            bbox_inches='tight', facecolor=DARK)
+plt.close()
+print("  Saved: sindy_617t_v6_uts.png")
+
+# ══════════════════════════════════════════════════════════════════════
+# FINAL SUMMARY
+# ══════════════════════════════════════════════════════════════════════
 print("\n" + "="*65)
-print("FINAL SUMMARY – ALLOY 617 TENSILE [v4]")
+print("FINAL SUMMARY – ALLOY 617  [v6]")
 print("="*65)
-print(f"\n  RT: {len(UTS)} specimens  |  HT/outlier: "
-      f"{len(df_ht) if REAL and df_ht is not None else 0}")
-print(f"  Φ condition number (after QR): {cond_final:.1f}")
-print(f"  Active features: {FEAT_ACTIVE}")
-print(f"\n  Identifiability:")
-for lbl in FEAT_LABELS_FULL:
-    s   = feat_stds[lbl]
-    ok  = id_flags[lbl]
-    tag = "OK" if ok else f"WEAK (std={s:.5f} < threshold)"
-    print(f"    {lbl:<20}: {tag}")
-print(f"\n  OLS R-O: UTS = {K_ro:.2f} · sr^{m_ro:.5f} · eps^{p_ro:.5f}")
-print(f"\n  SINDy (thresh={best_thresh:.5f}, {n_act_t} terms):")
-print(fmt_eq(coefs_act))
-print(f"\n  Similarity (identifiable terms, n={n_id}): {mean_sim_act:.4f}")
-if not np.isnan(corr):
-    print(f"  Pearson r (noise→sim) = {corr:.4f}  (p={pval:.4f})")
-print(f"\n  Key insight: log(sr) is NOT identifiable from this dataset")
-print(f"    ({sr_dec:.2f} decade SR span; need ≥ 2 decades for reliable SINDy rate ID)")
-print(f"    Both OLS m={m_ro:.5f} and SINDy m=0 should be treated with caution.")
-print(f"\n  Outputs:")
-for f in ["sindy_617t_analysis.png",
-          "sindy_617t_equation_similarity.csv",
-          "sindy_617t_sensitivity_analysis.csv",
-          "sindy_617t_model_comparison.csv",
-          "sindy_617t_discovered_equations.csv",
-          "sindy_617t_identifiability.csv",
-          "sindy_617t_RT_specimens.csv",
-          "sindy_617t_HT_specimens.csv"]:
+print(f"\n  UTS: N={len(UTS)} specimens, SR span={sr_dec_u:.2f} dec, "
+      f"cond={cond_u:.1f}")
+print(f"  OLS: UTS = {K_ro:.1f} · sr^{m_ro:.5f} · eps^{p_ro:.5f}")
+print(fmt_eq(coefs_u, 'log(UTS)'))
+print(f"  R²_log={r2_u_log:.4f}  R²_UTS={r2_u_lin:.4f}  sim={mean_sim_u:.4f}")
+
+print(f"\n  Point-wise pipeline:")
+print(f"  {'Filter':<8}  {'N':>5}  {'span':>5}  {'cond':>6}  "
+      f"{'QR kept':<35}  {'R²_log':>7}  {'m_OLS':>8}  {'m_SINDy':>8}  {'sim':>6}")
+print("  " + "-"*105)
+for fl in flist_valid:
+    r = pw_results[fl]
+    m_s = r['coefs'].get('log(sr_inst)', 0)
+    print(f"  {fl:<8}  {r['n']:>5}  {r['sr_span']:>5.2f}  "
+          f"{r['cond_fin']:>6.1f}  {str(r['FEAT_ACT']):<35}  "
+          f"{r['r2_log']:>7.4f}  {r['m_ols']:>8.5f}  {m_s:>8.5f}  "
+          f"{r['mean_sim']:>6.4f}")
+
+print(f"\n  Key question: does any filter level recover m ≈ OLS m?")
+for fl in flist_valid:
+    r = pw_results[fl]
+    m_s = r['coefs'].get('log(sr_inst)', 0)
+    m_o = r['m_ols']
+    match = abs(m_s - m_o) < 0.05
+    print(f"  {fl}: SINDy m={m_s:+.5f}  OLS m={m_o:+.5f}  "
+          f"{'✓ MATCH' if match else '✗ off by ' + f'{abs(m_s-m_o):.5f}'}")
+
+print(f"\n  Outputs → {OUT}")
+for f in ["sindy_617t_v6_filter_comparison.png",
+          "sindy_617t_v6_cross_filter.png",
+          "sindy_617t_v6_uts.png"]:
     print(f"    {f}")
