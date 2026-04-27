@@ -148,7 +148,7 @@ Add your generated figures here.
 
 Example:
 
-![SINDy Pipeline Results 316 SS](image-2.png)
+![SINDy Pipeline Results 316 SS]([image-2.png](https://kommodo.ai/i/ncs7jnJfyswgKG02oX2G))
 
 ![SINDy Pipeline Results 617 Alloy](image-3.png)
 
@@ -159,7 +159,7 @@ Example:
 ```text
 /project
 │
-├── Archieve Code/
+├── Archive Code/
 ├── Project_base_files/
 ├──── 316 Stainless Steel tests
 ├──── Alloy 617 Test
