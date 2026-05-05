@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -18,7 +19,23 @@ from sklearn.metrics import (
 # =========================================================
 CSV_FILE = r"C:\Users\Admin\Documents\GitHub\Sparse-Identification-of-Nonlinear-Dynamic-Systems\Project_base_files\316 Stainless Steel tests\on-ter-creep\SS316H-on-ter-creep.csv"
 
-DASHBOARD_OUT = "S316H_creep_dashboard.png"
+DASHBOARD_OUT = "SS316H_creep_dashboard.png"
+
+# =========================================================
+# NOTE ABOUT REQUIREMENT
+# =========================================================
+# Required formulas:
+#
+# relative error =
+# (Analytical equation coefficient - SINDy equation coefficient)
+# / Analytical equation coefficient
+#
+# metric = 1 - relative error
+#
+# This code uses Ridge model coefficients as the model equation coefficients.
+# If your instructor requires true SINDy coefficients, this section can be
+# modified after your Monday meeting.
+# =========================================================
 
 # =========================================================
 # LOAD DATA
@@ -54,20 +71,15 @@ df = df[df["t_ter_h"] > 0].reset_index(drop=True)
 # REMOVE OUTLIERS
 # =========================================================
 upper_limit = df["t_ter_h"].quantile(0.99)
-
 df = df[df["t_ter_h"] < upper_limit].reset_index(drop=True)
 
 # =========================================================
 # PHYSICS-INFORMED FEATURES
 # =========================================================
 df["inv_temp"] = 1.0 / df["temp_k"]
-
 df["log_stress"] = np.log(df["stress_mpa"])
-
-df["stress_temp_ratio"] = (df["stress_mpa"] / df["temp_k"])
-
+df["stress_temp_ratio"] = df["stress_mpa"] / df["temp_k"]
 df["stress_sq"] = df["stress_mpa"] ** 2
-
 df["temp_sq"] = df["temp_k"] ** 2
 
 # =========================================================
@@ -93,9 +105,9 @@ heat_cols = [c for c in df_encoded.columns if c.startswith("heat_")]
 feature_cols += heat_cols
 
 X_df = df_encoded[feature_cols]
-
 X = X_df.values
 
+# Target variable: log time to tertiary creep
 y = np.log(df_encoded["t_ter_h"].values)
 
 # =========================================================
@@ -111,7 +123,6 @@ y = np.log(df_encoded["t_ter_h"].values)
 scaler = StandardScaler()
 
 X_train_scaled = scaler.fit_transform(X_train)
-
 X_test_scaled = scaler.transform(X_test)
 
 # =========================================================
@@ -140,72 +151,37 @@ ridge_model.fit(
 # =========================================================
 y_test_h = np.exp(y_test)
 
-# ExtraTrees
+# ExtraTrees prediction
 y_pred_et_log = et_model.predict(X_test)
-
 y_pred_et_h = np.exp(y_pred_et_log)
 
-# Ridge
-y_pred_ridge_log = ridge_model.predict(
-    X_test_scaled
-)
-
-y_pred_ridge_h = np.exp(
-    y_pred_ridge_log
-)
+# Ridge prediction
+y_pred_ridge_log = ridge_model.predict(X_test_scaled)
+y_pred_ridge_h = np.exp(y_pred_ridge_log)
 
 # =========================================================
-# METRICS FUNCTION
+# STANDARD PREDICTION METRICS
 # =========================================================
 def get_metrics(y_true_log, y_pred_h):
-
     y_true_h = np.exp(y_true_log)
-
     y_pred_log = np.log(np.clip(y_pred_h, 1e-12, None))
 
     mae = mean_absolute_error(y_true_h, y_pred_h)
+    mape = mean_absolute_percentage_error(y_true_h, y_pred_h) * 100
+    rmse = np.sqrt(mean_squared_error(y_true_h, y_pred_h))
+    r2_log = r2_score(y_true_log, y_pred_log)
+    r2_h = r2_score(y_true_h, y_pred_h)
 
-    mape = (mean_absolute_percentage_error(y_true_h,y_pred_h) * 100
-)
+    return mae, mape, rmse, r2_log, r2_h
 
-    rmse = np.sqrt(
-        mean_squared_error(
-            y_true_h,
-            y_pred_h
-        )
-    )
 
-    r2_log = r2_score(
-        y_true_log,
-        y_pred_log
-    )
-
-    r2_h = r2_score(
-        y_true_h,
-        y_pred_h
-    )
-
-    return (
-        mae,
-        mape,
-        rmse,
-        r2_log,
-        r2_h
-    )
-
-# =========================================================
-# COMPUTE METRICS
-# =========================================================
 (
     et_mae,
     et_mape,
     et_rmse,
     et_r2_log,
     et_r2_h
-) = get_metrics(
-    y_test,
-    y_pred_et_h
-)
+) = get_metrics(y_test, y_pred_et_h)
 
 (
     ridge_mae,
@@ -213,18 +189,14 @@ def get_metrics(y_true_log, y_pred_h):
     ridge_rmse,
     ridge_r2_log,
     ridge_r2_h
-) = get_metrics(
-    y_test,
-    y_pred_ridge_h
-)
+) = get_metrics(y_test, y_pred_ridge_h)
 
 # =========================================================
-# PRINT METRICS
+# PRINT PREDICTION METRICS
 # =========================================================
 print("\n" + "=" * 70)
 print("ExtraTrees - PREDICTION METRICS")
 print("=" * 70)
-
 print(f"MAE (hours)     = {et_mae:.6f}")
 print(f"MAPE (%)        = {et_mape:.6f}")
 print(f"RMSE (hours)    = {et_rmse:.6f}")
@@ -234,7 +206,6 @@ print(f"R² hours        = {et_r2_h:.6f}")
 print("\n" + "=" * 70)
 print("Ridge - PREDICTION METRICS")
 print("=" * 70)
-
 print(f"MAE (hours)     = {ridge_mae:.6f}")
 print(f"MAPE (%)        = {ridge_mape:.6f}")
 print(f"RMSE (hours)    = {ridge_rmse:.6f}")
@@ -242,48 +213,149 @@ print(f"R² log space    = {ridge_r2_log:.6f}")
 print(f"R² hours        = {ridge_r2_h:.6f}")
 
 # =========================================================
-# RIDGE PARAMETERS
+# MODEL EQUATION PARAMETERS
 # =========================================================
 ridge_intercept = ridge_model.intercept_
-
 ridge_coeffs = ridge_model.coef_
 
-coef_df = pd.DataFrame({
-    "Feature": feature_cols,
-    "Coefficient": ridge_coeffs,
-    "AbsCoefficient": np.abs(ridge_coeffs)
-})
-
-coef_df = coef_df.sort_values(
-    "AbsCoefficient",
-    ascending=True
-)
-
-# =========================================================
-# PRINT RIDGE EQUATION
-# =========================================================
 print("\n" + "=" * 70)
-print("RIDGE MODEL EQUATION PARAMETERS")
+print("MODEL EQUATION PARAMETERS")
 print("=" * 70)
 
 print(f"Intercept: {ridge_intercept:.10f}")
 
-for name, coef in zip(
-    feature_cols,
-    ridge_coeffs
-):
+for name, coef in zip(feature_cols, ridge_coeffs):
     print(f"{name:20s}: {coef:.10f}")
+
+# =========================================================
+# PRINT MODEL EQUATION
+# =========================================================
+equation_terms = [f"({ridge_intercept:.10f})"]
+
+for name, coef in zip(feature_cols, ridge_coeffs):
+    sign = "+" if coef >= 0 else "-"
+    equation_terms.append(
+        f" {sign} ({abs(coef):.10f})*{name}"
+    )
+
+equation_str = "log(t_ter_h) = " + "".join(equation_terms)
+
+print("\n" + "=" * 70)
+print("MODEL EQUATION")
+print("=" * 70)
+print(equation_str)
+
+# =========================================================
+# ANALYTICAL EQUATION COEFFICIENTS
+# =========================================================
+# Replace these placeholder coefficients with the actual analytical
+# coefficients from your equation/literature/model.
+#
+# The keys must match the model parameter names exactly.
+# =========================================================
+analytical_coeffs = {
+    "Intercept": 0.5000,
+    "temp_k": 0.0001,
+    "stress_mpa": -0.0100,
+    "inv_temp": 1000.0000,
+    "log_stress": -2.5000,
+    "stress_temp_ratio": -0.0500,
+    "stress_sq": 0.00001,
+    "temp_sq": -0.0000001,
+}
+
+# =========================================================
+# REQUIRED RELATIVE ERROR + METRIC
+# =========================================================
+# relative error =
+# (Analytical equation coefficient - SINDy equation coefficient)
+# / Analytical equation coefficient
+#
+# metric = 1 - relative error
+#
+# Here, "SINDy equation coefficient" is represented by the model coefficient.
+# =========================================================
+model_params = {
+    "Intercept": ridge_intercept
+}
+
+for name, coef in zip(feature_cols, ridge_coeffs):
+    model_params[name] = coef
+
+comparison_rows = []
+
+for term, analytical_value in analytical_coeffs.items():
+    sindy_value = model_params.get(term, np.nan)
+
+    if pd.isna(sindy_value):
+        relative_error = np.nan
+        metric = np.nan
+        note = "SINDy/model coefficient not found"
+
+    elif analytical_value == 0:
+        relative_error = np.nan
+        metric = np.nan
+        note = "Analytical coefficient is 0, cannot divide by zero"
+
+    else:
+        relative_error = (analytical_value - sindy_value) / analytical_value
+        metric = 1 - relative_error
+        note = ""
+
+    comparison_rows.append({
+        "Term": term,
+        "Analytical equation coefficient": analytical_value,
+        "SINDy equation coefficient": sindy_value,
+        "Relative error": relative_error,
+        "Metric": metric,
+        "Note": note
+    })
+
+comparison_df = pd.DataFrame(comparison_rows)
+
+print("\n" + "=" * 70)
+print("COEFFICIENT COMPARISON: ANALYTICAL vs SINDY/MODEL")
+print("=" * 70)
+print(comparison_df.to_string(index=False))
+
+# =========================================================
+# OVERALL REQUIRED METRIC
+# =========================================================
+valid_metric_values = comparison_df["Metric"].dropna()
+
+print("\n" + "=" * 70)
+print("OVERALL REQUIRED METRIC")
+print("=" * 70)
+
+if len(valid_metric_values) > 0:
+    overall_metric = valid_metric_values.mean()
+    print(f"Average metric = {overall_metric:.10f}")
+else:
+    overall_metric = np.nan
+    print("No valid metric could be computed.")
+
+# =========================================================
+# SAVE COEFFICIENT COMPARISON TABLE
+# =========================================================
+output_dir = os.path.dirname(DASHBOARD_OUT)
+
+comparison_csv = os.path.join(
+    output_dir,
+    "coefficient_comparison_metric.csv"
+)
+
+comparison_df.to_csv(
+    comparison_csv,
+    index=False
+)
+
+print(f"\nCoefficient comparison saved to:\n{comparison_csv}")
 
 # =========================================================
 # RESIDUALS
 # =========================================================
-et_residuals = (
-    y_test_h - y_pred_et_h
-)
-
-ridge_residuals = (
-    y_test_h - y_pred_ridge_h
-)
+et_residuals = y_test_h - y_pred_et_h
+ridge_residuals = y_test_h - y_pred_ridge_h
 
 # =========================================================
 # DASHBOARD STYLE
@@ -313,7 +385,6 @@ fig, axes = plt.subplots(
 fig.patch.set_facecolor(FIG_BG)
 
 for ax in axes.flatten():
-
     ax.set_facecolor(AX_BG)
 
     ax.grid(
@@ -323,11 +394,8 @@ for ax in axes.flatten():
     )
 
     ax.tick_params(colors=TXT_C)
-
     ax.xaxis.label.set_color(TXT_C)
-
     ax.yaxis.label.set_color(TXT_C)
-
     ax.title.set_color("#93c5fd")
 
 # =========================================================
@@ -359,12 +427,8 @@ ax.plot(
     color=RED
 )
 
-ax.set_title(
-    "ExtraTrees: Actual vs Predicted"
-)
-
+ax.set_title("ExtraTrees: Actual vs Predicted")
 ax.set_xlabel("Actual Time (h)")
-
 ax.set_ylabel("Predicted Time (h)")
 
 ax.text(
@@ -406,12 +470,8 @@ ax.plot(
     color=RED
 )
 
-ax.set_title(
-    "Ridge: Actual vs Predicted"
-)
-
+ax.set_title("Ridge: Actual vs Predicted")
 ax.set_xlabel("Actual Time (h)")
-
 ax.set_ylabel("Predicted Time (h)")
 
 ax.text(
@@ -460,17 +520,19 @@ for model_name, xval, yval in zip(
         color=TXT_C
     )
 
-ax.set_title(
-    "Model Quality: RMSE vs R²"
-)
-
+ax.set_title("Model Quality: RMSE vs R²")
 ax.set_xlabel("RMSE")
-
 ax.set_ylabel("R²")
 
 # =========================================================
 # 4. FEATURE IMPORTANCE
 # =========================================================
+coef_df = pd.DataFrame({
+    "Feature": feature_cols,
+    "Coefficient": ridge_coeffs,
+    "AbsCoefficient": np.abs(ridge_coeffs)
+}).sort_values("AbsCoefficient", ascending=True)
+
 ax = axes[1, 0]
 
 top_coef_df = coef_df.tail(10)
@@ -481,16 +543,11 @@ ax.barh(
     color=GREEN
 )
 
-ax.set_title(
-    "Feature Importance\n(|Ridge coefficient|)"
-)
-
-ax.set_xlabel(
-    "Absolute coefficient"
-)
+ax.set_title("Feature Importance\n(|Model coefficient|)")
+ax.set_xlabel("Absolute coefficient")
 
 # =========================================================
-# 5. MAIN RIDGE COEFFICIENTS
+# 5. MAIN MODEL COEFFICIENTS
 # =========================================================
 ax = axes[1, 1]
 
@@ -528,47 +585,31 @@ ax.axhline(
     linestyle="--"
 )
 
-ax.set_title(
-    "Main Equation Coefficients"
-)
-
-ax.tick_params(
-    axis="x",
-    rotation=45
-)
+ax.set_title("Main Equation Coefficients")
+ax.tick_params(axis="x", rotation=45)
 
 # =========================================================
-# 6. ERROR VS TEMPERATURE
+# 6. REQUIRED METRIC BY TERM
 # =========================================================
 ax = axes[1, 2]
 
-test_temp = X_test_df["temp_k"].values
+plot_df = comparison_df.dropna(subset=["Metric"])
 
-ax.scatter(
-    test_temp,
-    np.abs(et_residuals),
-    color=GREEN,
-    alpha=0.7,
-    label="ExtraTrees"
+ax.bar(
+    plot_df["Term"],
+    plot_df["Metric"],
+    color=PURPLE
 )
 
-ax.scatter(
-    test_temp,
-    np.abs(ridge_residuals),
-    color=BLUE,
-    alpha=0.7,
-    label="Ridge"
+ax.axhline(
+    0,
+    color=RED,
+    linestyle="--"
 )
 
-ax.set_title(
-    "Prediction Error vs Temperature"
-)
-
-ax.set_xlabel("Temperature (K)")
-
-ax.set_ylabel("Absolute Error (h)")
-
-ax.legend()
+ax.set_title("Required Metric by Coefficient")
+ax.set_ylabel("Metric = 1 - relative error")
+ax.tick_params(axis="x", rotation=45)
 
 # =========================================================
 # 7. STRESS VS LOG TIME
@@ -582,15 +623,9 @@ ax.scatter(
     alpha=0.7
 )
 
-ax.set_title(
-    "Stress vs log(Time)"
-)
-
+ax.set_title("Stress vs log(Time)")
 ax.set_xlabel("Stress (MPa)")
-
-ax.set_ylabel(
-    "log(Time to tertiary creep)"
-)
+ax.set_ylabel("log(Time to tertiary creep)")
 
 # =========================================================
 # 8. 1/TEMP VS LOG TIME
@@ -604,23 +639,14 @@ ax.scatter(
     alpha=0.7
 )
 
-ax.set_title(
-    "1/Temperature vs log(Time)"
-)
-
-ax.set_xlabel(
-    "1 / Temperature (1/K)"
-)
-
-ax.set_ylabel(
-    "log(Time to tertiary creep)"
-)
+ax.set_title("1/Temperature vs log(Time)")
+ax.set_xlabel("1 / Temperature (1/K)")
+ax.set_ylabel("log(Time to tertiary creep)")
 
 # =========================================================
 # 9. SUMMARY PANEL
 # =========================================================
 ax = axes[2, 2]
-
 ax.axis("off")
 
 best_model = (
@@ -659,8 +685,11 @@ MAPE  = {ridge_mape:.2f} %
 RMSE  = {ridge_rmse:.2f} h
 R²    = {ridge_r2_h:.4f}
 
-Intercept:
-{ridge_intercept:.4f}
+Required metric:
+Average = {overall_metric:.4f}
+
+Metric formula:
+1 - relative error
 """
 
 ax.text(
@@ -678,7 +707,7 @@ ax.text(
 # DASHBOARD TITLE
 # =========================================================
 fig.suptitle(
-    "SS316H Stainless Steel — Creep Prediction Dashboard",
+    "SS316H Stainless Steel — Creep Prediction + Required Metric Dashboard",
     fontsize=20,
     color=TXT_C,
     y=0.98
@@ -687,9 +716,7 @@ fig.suptitle(
 # =========================================================
 # SAVE DASHBOARD
 # =========================================================
-plt.tight_layout(
-    rect=[0, 0, 1, 0.95]
-)
+plt.tight_layout(rect=[0, 0, 1, 0.95])
 
 plt.savefig(
     DASHBOARD_OUT,
@@ -698,6 +725,6 @@ plt.savefig(
     facecolor=FIG_BG
 )
 
-print(f"Saved: {DASHBOARD_OUT}")
+print(f"Saved dashboard: {DASHBOARD_OUT}")
 
 plt.show()
