@@ -574,7 +574,10 @@ ax = fig.add_subplot(gs[0, 0])
 sc = ax.scatter(y_log, y_best, s=15, alpha=0.55, c=Temp,
                 cmap='plasma', edgecolors='none')
 ax.plot(ll, ll, '--', color=C2, lw=1.5)
-plt.colorbar(sc, ax=ax, label='Temp (K)').ax.yaxis.label.set_color(TEXT)
+cb = plt.colorbar(sc, ax=ax, label='Temp (K)')
+cb.ax.yaxis.label.set_color(TEXT)
+cb.ax.tick_params(colors=TEXT)
+cb.outline.set_edgecolor(GRID)
 sax(ax, f'ML ({best_ml})  Actual vs Predicted',
     'Actual log(t)', 'Predicted log(t)')
 ax.text(0.05, 0.92, f"R²={RES[best_ml]['te_r2']:.4f}",

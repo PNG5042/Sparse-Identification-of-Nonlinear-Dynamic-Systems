@@ -971,7 +971,7 @@ for hi in range(n_heats_u):
     ax_u3.scatter(UTS[mask], yp_uts[mask], s=55, alpha=0.85,
                   color=HC[hi%len(HC)], edgecolors='none')
 ax_u3.plot(uts_ll, uts_ll, '--', color=C2, lw=1.5)
-ax_u3.text(0.05, 0.91,
+ax_u3.text(0.05, 0.75,
            f"R²_log={r2_u_log:.4f}\nR²_UTS={r2_u_lin:.4f}\n"
            f"sim={mean_sim_u:.4f}",
            transform=ax_u3.transAxes, color=C3, fontsize=9, fontweight='bold')
